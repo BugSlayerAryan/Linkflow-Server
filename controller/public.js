@@ -1617,10 +1617,10 @@ if (!fs.existsSync(previewDir)) {
 }
 
 /**
- * Change this whenever preview logic changes.
- * This avoids old cached silent/broken preview files.
+ * Change this when preview logic changes.
+ * This prevents old silent/broken cached previews from being reused.
  */
-const PREVIEW_CACHE_VERSION = "v7-stable-audio-preview";
+const PREVIEW_CACHE_VERSION = "v8-audio-safe-preview";
 
 const previewJobs = new Map();
 
@@ -1651,11 +1651,6 @@ const createContentDisposition = (filename) => {
   return `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`;
 };
 
-const safeDeleteFile = (filePath) => {
-  if (!filePath) return;
-  fs.unlink(filePath, () => {});
-};
-
 const getContentType = (filePath) => {
   const ext = path.extname(filePath).toLowerCase();
 
@@ -1665,6 +1660,11 @@ const getContentType = (filePath) => {
   if (ext === ".mp4") return "video/mp4";
 
   return "application/octet-stream";
+};
+
+const safeDeleteFile = (filePath) => {
+  if (!filePath) return;
+  fs.unlink(filePath, () => {});
 };
 
 const isClientDisconnected = (res) => {
@@ -1867,36 +1867,6 @@ const normalizeErrorMessage = (stderr = "") => {
   };
 };
 
-const getUrlHash = (value = "") => {
-  return crypto
-    .createHash("sha256")
-    .update(`${PREVIEW_CACHE_VERSION}:${String(value)}`)
-    .digest("hex")
-    .slice(0, 32);
-};
-
-const getPreviewPath = (url) => {
-  const hash = getUrlHash(url);
-  return path.join(previewDir, `${hash}.mp4`);
-};
-
-const isValidPreparedFile = (filePath) => {
-  try {
-    if (!fs.existsSync(filePath)) return false;
-
-    const stat = fs.statSync(filePath);
-    return stat.size > 1024;
-  } catch {
-    return false;
-  }
-};
-
-const getPublicPreviewUrl = (req, originalUrl) => {
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
-
-  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
-};
-
 const sendPreparedFile = (res, filePath, downloadName) => {
   if (!fs.existsSync(filePath)) {
     return sendJsonIfConnected(res, 500, {
@@ -1934,6 +1904,36 @@ const sendPreparedFile = (res, filePath, downloadName) => {
       });
     }
   });
+};
+
+const getUrlHash = (value = "") => {
+  return crypto
+    .createHash("sha256")
+    .update(`${PREVIEW_CACHE_VERSION}:${String(value)}`)
+    .digest("hex")
+    .slice(0, 32);
+};
+
+const getPreviewPath = (url) => {
+  const hash = getUrlHash(url);
+  return path.join(previewDir, `${hash}.mp4`);
+};
+
+const isValidPreparedFile = (filePath) => {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+
+    const stat = fs.statSync(filePath);
+    return stat.size > 1024;
+  } catch {
+    return false;
+  }
+};
+
+const getPublicPreviewUrl = (req, originalUrl) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
 };
 
 const sendVideoFileWithRange = (req, res, filePath) => {
@@ -2026,16 +2026,13 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
     "30",
     "-N",
     "4",
-
-    /**
-     * Preview should have sound:
-     * 1. Prefer complete MP4 with audio.
-     * 2. Then complete best with audio.
-     * 3. Then merge video + audio.
-     */
     "-f",
-    "b[ext=mp4][acodec!=none]/b[acodec!=none]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
-
+    [
+      "best[ext=mp4][acodec!=none]",
+      "best[acodec!=none]",
+      "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
+      "bestvideo+bestaudio",
+    ].join("/"),
     "--merge-output-format",
     "mp4",
     "--recode-video",
@@ -2844,7 +2841,6 @@ exports.downloadDirectMedia = async (req, res) => {
       audioUrl,
       videoFormatId,
       audioFormatId,
-      hasAudio,
     } = req.body;
 
     const safeTitle = sanitizeFileName(title || "linkflow-download");
@@ -2860,11 +2856,6 @@ exports.downloadDirectMedia = async (req, res) => {
 
     const originalUrlValue = String(originalUrl || "");
 
-    /**
-     * Main path:
-     * Use yt-dlp with original page URL. This is required for X.com,
-     * Instagram, TikTok, Facebook, Reddit, etc.
-     */
     if (originalUrlValue) {
       const outputTemplate = path.join(
         outputDir,
@@ -2885,7 +2876,7 @@ exports.downloadDirectMedia = async (req, res) => {
       if (type === "audio") {
         args.push(
           "-f",
-          audioFormatId || "ba/bestaudio/best",
+          audioFormatId || "bestaudio/best",
           "-x",
           "--audio-format",
           "mp3",
@@ -2896,15 +2887,21 @@ exports.downloadDirectMedia = async (req, res) => {
           originalUrlValue
         );
       } else {
-        let formatSpec =
-          "b[ext=mp4][acodec!=none]/b[acodec!=none]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b";
+        let formatSpec = [
+          "best[ext=mp4][acodec!=none]",
+          "best[acodec!=none]",
+          "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
+          "bestvideo+bestaudio",
+        ].join("/");
 
         if (videoFormatId && audioFormatId) {
-          formatSpec = `${videoFormatId}+${audioFormatId}/b[ext=mp4][acodec!=none]/bv*+ba/b`;
-        } else if (videoFormatId && (hasAudio === true || hasAudio === "true")) {
-          formatSpec = `${videoFormatId}/b[ext=mp4][acodec!=none]/bv*+ba/b`;
-        } else if (videoFormatId) {
-          formatSpec = `${videoFormatId}+ba/${videoFormatId}+bestaudio/bv*+ba/b[acodec!=none]/b`;
+          formatSpec = [
+            `${videoFormatId}+${audioFormatId}`,
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
+            "bestvideo+bestaudio",
+            "best[ext=mp4][acodec!=none]",
+            "best[acodec!=none]",
+          ].join("/");
         }
 
         args.push(
@@ -3027,10 +3024,6 @@ exports.downloadDirectMedia = async (req, res) => {
       return;
     }
 
-    /**
-     * Fallback path:
-     * Only used if frontend sends direct video/audio URLs.
-     */
     if (type === "video" && !videoUrl) {
       hasFinished = true;
 
