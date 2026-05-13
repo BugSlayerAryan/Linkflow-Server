@@ -1593,18 +1593,12 @@
 
 
 
-const { spawn, spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
-const FFPROBE_PATH =
-  process.env.FFPROBE_PATH ||
-  (FFMPEG_PATH.includes("ffmpeg")
-    ? FFMPEG_PATH.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1")
-    : "ffprobe");
-
 const YTDLP_PATH = process.env.YTDLP_PATH || "yt-dlp";
 
 exports.startApi = (req, res) => {
@@ -1614,11 +1608,21 @@ exports.startApi = (req, res) => {
 const outputDir = path.join(__dirname, "..", "downloads");
 const previewDir = path.join(__dirname, "..", "previews");
 
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-if (!fs.existsSync(previewDir)) fs.mkdirSync(previewDir, { recursive: true });
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir, { recursive: true });
+}
+
+if (!fs.existsSync(previewDir)) {
+  fs.mkdirSync(previewDir, { recursive: true });
+}
+
+/**
+ * Change this whenever preview logic changes.
+ * This avoids old cached silent/broken preview files.
+ */
+const PREVIEW_CACHE_VERSION = "v7-stable-audio-preview";
 
 const previewJobs = new Map();
-const PREVIEW_CACHE_VERSION = "v4-force-audio-preview";
 
 const sanitizeFileName = (value = "linkflow-download") => {
   const cleaned = String(value || "linkflow-download")
@@ -1647,6 +1651,11 @@ const createContentDisposition = (filename) => {
   return `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`;
 };
 
+const safeDeleteFile = (filePath) => {
+  if (!filePath) return;
+  fs.unlink(filePath, () => {});
+};
+
 const getContentType = (filePath) => {
   const ext = path.extname(filePath).toLowerCase();
 
@@ -1658,22 +1667,21 @@ const getContentType = (filePath) => {
   return "application/octet-stream";
 };
 
-const safeDeleteFile = (filePath) => {
-  if (!filePath) return;
-  fs.unlink(filePath, () => {});
-};
-
 const isClientDisconnected = (res) => {
   return res.destroyed || res.writableEnded;
 };
 
 const sendJsonIfConnected = (res, statusCode, payload) => {
-  if (res.destroyed || res.writableEnded || res.headersSent) return;
+  if (res.destroyed || res.writableEnded || res.headersSent) {
+    return;
+  }
+
   return res.status(statusCode).json(payload);
 };
 
 const getCleanProcessError = (stderr = "") => {
   const text = String(stderr || "").trim();
+
   if (!text) return "Process stopped before completion.";
 
   const lines = text
@@ -1681,17 +1689,16 @@ const getCleanProcessError = (stderr = "") => {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  return (
+  const importantLine =
     [...lines]
       .reverse()
       .find((line) =>
-        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate|audio/i.test(
+        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate/i.test(
           line
         )
-      ) ||
-    lines[0] ||
-    "Download process failed."
-  );
+      ) || lines[0];
+
+  return importantLine || "Download process failed.";
 };
 
 const normalizeErrorMessage = (stderr = "") => {
@@ -1860,38 +1867,34 @@ const normalizeErrorMessage = (stderr = "") => {
   };
 };
 
-const fileHasAudio = (filePath) => {
+const getUrlHash = (value = "") => {
+  return crypto
+    .createHash("sha256")
+    .update(`${PREVIEW_CACHE_VERSION}:${String(value)}`)
+    .digest("hex")
+    .slice(0, 32);
+};
+
+const getPreviewPath = (url) => {
+  const hash = getUrlHash(url);
+  return path.join(previewDir, `${hash}.mp4`);
+};
+
+const isValidPreparedFile = (filePath) => {
   try {
     if (!fs.existsSync(filePath)) return false;
 
-    const result = spawnSync(
-      FFPROBE_PATH,
-      [
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=codec_type",
-        "-of",
-        "csv=p=0",
-        filePath,
-      ],
-      {
-        encoding: "utf8",
-      }
-    );
-
-    if (result.error) {
-      console.log("ffprobe check skipped:", result.error.message);
-      return true;
-    }
-
-    return String(result.stdout || "").toLowerCase().includes("audio");
-  } catch (err) {
-    console.log("ffprobe check failed:", err.message);
-    return true;
+    const stat = fs.statSync(filePath);
+    return stat.size > 1024;
+  } catch {
+    return false;
   }
+};
+
+const getPublicPreviewUrl = (req, originalUrl) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
 };
 
 const sendPreparedFile = (res, filePath, downloadName) => {
@@ -1911,10 +1914,13 @@ const sendPreparedFile = (res, filePath, downloadName) => {
   res.setHeader("Content-Disposition", createContentDisposition(finalName));
 
   const stream = fs.createReadStream(filePath);
+
   stream.pipe(res);
 
   stream.on("close", () => {
-    setTimeout(() => safeDeleteFile(filePath), 60 * 1000);
+    setTimeout(() => {
+      safeDeleteFile(filePath);
+    }, 60 * 1000);
   });
 
   stream.on("error", (err) => {
@@ -1928,34 +1934,6 @@ const sendPreparedFile = (res, filePath, downloadName) => {
       });
     }
   });
-};
-
-const getUrlHash = (value = "") => {
-  return crypto
-    .createHash("sha256")
-    .update(`${PREVIEW_CACHE_VERSION}:${String(value)}`)
-    .digest("hex")
-    .slice(0, 32);
-};
-
-const getPreviewPath = (url) => {
-  const hash = getUrlHash(url);
-  return path.join(previewDir, `${hash}.mp4`);
-};
-
-const isValidPreparedFile = (filePath) => {
-  try {
-    if (!fs.existsSync(filePath)) return false;
-    const stat = fs.statSync(filePath);
-    return stat.size > 1024;
-  } catch {
-    return false;
-  }
-};
-
-const getPublicPreviewUrl = (req, originalUrl) => {
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
-  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
 };
 
 const sendVideoFileWithRange = (req, res, filePath) => {
@@ -1973,7 +1951,10 @@ const sendVideoFileWithRange = (req, res, filePath) => {
 
   res.setHeader("Content-Type", "video/mp4");
   res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "public, max-age=1800");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
 
   if (!range) {
@@ -1981,8 +1962,10 @@ const sendVideoFileWithRange = (req, res, filePath) => {
     res.setHeader("Content-Length", fileSize);
 
     const stream = fs.createReadStream(filePath);
+
     stream.on("error", (err) => {
       console.log("Preview file stream error:", err.message);
+
       if (!res.headersSent) {
         sendJsonIfConnected(res, 500, {
           status: "fail",
@@ -2018,8 +2001,10 @@ const sendVideoFileWithRange = (req, res, filePath) => {
   res.setHeader("Content-Length", chunkSize);
 
   const stream = fs.createReadStream(filePath, { start, end });
+
   stream.on("error", (err) => {
     console.log("Preview range stream error:", err.message);
+
     if (!res.headersSent) {
       sendJsonIfConnected(res, 500, {
         status: "fail",
@@ -2041,14 +2026,16 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
     "30",
     "-N",
     "4",
+
+    /**
+     * Preview should have sound:
+     * 1. Prefer complete MP4 with audio.
+     * 2. Then complete best with audio.
+     * 3. Then merge video + audio.
+     */
     "-f",
-    [
-      "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]",
-      "bv*[ext=mp4]+ba[ext=m4a]",
-      "bv*+ba",
-      "b[ext=mp4][acodec!=none]",
-      "b[acodec!=none]",
-    ].join("/"),
+    "b[ext=mp4][acodec!=none]/b[acodec!=none]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+
     "--merge-output-format",
     "mp4",
     "--recode-video",
@@ -2064,15 +2051,13 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
 const createPlayablePreview = (url) => {
   const outputPath = getPreviewPath(url);
 
-  if (isValidPreparedFile(outputPath) && fileHasAudio(outputPath)) {
+  if (isValidPreparedFile(outputPath)) {
     return Promise.resolve(outputPath);
   }
 
-  if (isValidPreparedFile(outputPath) && !fileHasAudio(outputPath)) {
-    safeDeleteFile(outputPath);
+  if (previewJobs.has(url)) {
+    return previewJobs.get(url);
   }
-
-  if (previewJobs.has(url)) return previewJobs.get(url);
 
   const job = new Promise((resolve, reject) => {
     const hash = getUrlHash(url);
@@ -2089,7 +2074,9 @@ const createPlayablePreview = (url) => {
       stderr += data.toString();
     });
 
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) => {
+      reject(err);
+    });
 
     child.on("close", (code) => {
       if (code !== 0) {
@@ -2116,7 +2103,11 @@ const createPlayablePreview = (url) => {
         .map((file) => {
           const filePath = path.join(previewDir, file);
           const stat = fs.statSync(filePath);
-          return { file, size: stat.size };
+
+          return {
+            file,
+            size: stat.size,
+          };
         })
         .sort((a, b) => b.size - a.size)[0]?.file;
 
@@ -2125,22 +2116,6 @@ const createPlayablePreview = (url) => {
       if (!isValidPreparedFile(finalPath)) {
         safeDeleteFile(finalPath);
         return reject(new Error("Preview file is invalid or empty."));
-      }
-
-      if (!fileHasAudio(finalPath)) {
-        safeDeleteFile(finalPath);
-
-        return reject(
-          Object.assign(
-            new Error(
-              "Preview was created without audio. Please try another quality or download directly."
-            ),
-            {
-              statusCode: 422,
-              code: "PREVIEW_AUDIO_MISSING",
-            }
-          )
-        );
       }
 
       resolve(finalPath);
@@ -2202,7 +2177,7 @@ const getCleanTitle = (data = {}) => {
   const description = data.description || "";
   const uploader = data.uploader || "";
 
-  const lines = description
+  const lines = String(description || "")
     .split("\n")
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
@@ -2213,7 +2188,7 @@ const getCleanTitle = (data = {}) => {
     uploader ||
     "Video";
 
-  title = title
+  title = String(title)
     .replace(/\s+/g, " ")
     .replace(
       /^\d+(\.\d+)?[KMB]?\s+views\s*·\s*\d+(\.\d+)?[KMB]?\s+reactions\s*\|\s*/i,
@@ -2277,11 +2252,17 @@ const formatSize = (bytes, estimated = false) => {
 
   let label = "";
 
-  if (gb >= 1) label = `${gb.toFixed(1)} GB`;
-  else if (mb >= 100) label = `${Math.round(mb)} MB`;
-  else if (mb >= 10) label = `${mb.toFixed(1)} MB`;
-  else if (mb >= 1) label = `${mb.toFixed(1)} MB`;
-  else label = `${Math.max(1, Math.round(kb))} KB`;
+  if (gb >= 1) {
+    label = `${gb.toFixed(1)} GB`;
+  } else if (mb >= 100) {
+    label = `${Math.round(mb)} MB`;
+  } else if (mb >= 10) {
+    label = `${mb.toFixed(1)} MB`;
+  } else if (mb >= 1) {
+    label = `${mb.toFixed(1)} MB`;
+  } else {
+    label = `${Math.max(1, Math.round(kb))} KB`;
+  }
 
   return estimated ? `Approx. ${label}` : label;
 };
@@ -2309,7 +2290,9 @@ const getDirectSizeBytes = (item = {}) => {
 const estimateSizeFromBitrate = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
 
-  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
+  if (!duration || Number.isNaN(duration) || duration <= 0) {
+    return null;
+  }
 
   const bitrateKbps =
     Number(item.tbr || 0) ||
@@ -2335,6 +2318,7 @@ const getEstimatedVideoBitrateKbps = (item = {}) => {
   if (height >= 480) return 1300;
   if (height >= 360) return 800;
   if (height >= 240) return 450;
+
   if (item.width && item.height) return 800;
 
   return 600;
@@ -2343,7 +2327,9 @@ const getEstimatedVideoBitrateKbps = (item = {}) => {
 const estimateVideoSizeFromResolution = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
 
-  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
+  if (!duration || Number.isNaN(duration) || duration <= 0) {
+    return null;
+  }
 
   let bitrateKbps = getEstimatedVideoBitrateKbps(item);
 
@@ -2357,7 +2343,9 @@ const estimateVideoSizeFromResolution = (item = {}, durationSeconds) => {
 const estimateAudioSize = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
 
-  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
+  if (!duration || Number.isNaN(duration) || duration <= 0) {
+    return null;
+  }
 
   const bitrateKbps =
     Number(item.abr || 0) ||
@@ -2372,11 +2360,17 @@ const getFallbackSizeBytes = (type = "video", durationSeconds) => {
   const duration = Number(durationSeconds || 0);
 
   if (duration && !Number.isNaN(duration) && duration > 0) {
-    if (type === "audio") return (128 * 1000 * duration) / 8;
+    if (type === "audio") {
+      return (128 * 1000 * duration) / 8;
+    }
+
     return (900 * 1000 * duration) / 8;
   }
 
-  if (type === "audio") return 512 * 1024;
+  if (type === "audio") {
+    return 512 * 1024;
+  }
+
   return 2 * 1024 * 1024;
 };
 
@@ -2442,7 +2436,7 @@ const getAspectRatio = (width, height, ytAspectRatio) => {
   return "landscape";
 };
 
-const getQualityLabel = (item) => {
+const getQualityLabel = (item = {}) => {
   const height = Number(item.height || 0);
 
   if (height >= 4320) return "4320p (8K)";
@@ -2454,7 +2448,9 @@ const getQualityLabel = (item) => {
   if (height >= 360) return "360p";
   if (height >= 240) return "240p";
 
-  if (item.width && item.height) return `${item.width}×${item.height}`;
+  if (item.width && item.height) {
+    return `${item.width}×${item.height}`;
+  }
 
   return item.format_note || item.resolution || item.format_id || "Default";
 };
@@ -2700,6 +2696,7 @@ exports.postMedia = async (req, res, next) => {
         )
         .sort((a, b) => {
           const byHeight = getSortHeight(b.quality) - getSortHeight(a.quality);
+
           if (byHeight !== 0) return byHeight;
 
           if (a.ext === "mp4" && b.ext !== "mp4") return -1;
@@ -2790,11 +2787,14 @@ exports.previewMedia = async (req, res) => {
     }
 
     const previewPath = await createPlayablePreview(url);
+
     return sendVideoFileWithRange(req, res, previewPath);
   } catch (err) {
     console.log("Preview prepare error:", err.message);
 
-    if (res.headersSent || res.destroyed || res.writableEnded) return;
+    if (res.headersSent || res.destroyed || res.writableEnded) {
+      return;
+    }
 
     return sendJsonIfConnected(res, err.statusCode || 500, {
       status: "fail",
@@ -2822,13 +2822,17 @@ exports.downloadDirectMedia = async (req, res) => {
       } catch {}
     }
 
-    if (outputPathToClean) safeDeleteFile(outputPathToClean);
+    if (outputPathToClean) {
+      safeDeleteFile(outputPathToClean);
+    }
   };
 
   req.on("aborted", cleanupProcess);
 
   res.on("close", () => {
-    if (!hasFinished) cleanupProcess();
+    if (!hasFinished) {
+      cleanupProcess();
+    }
   });
 
   try {
@@ -2856,6 +2860,11 @@ exports.downloadDirectMedia = async (req, res) => {
 
     const originalUrlValue = String(originalUrl || "");
 
+    /**
+     * Main path:
+     * Use yt-dlp with original page URL. This is required for X.com,
+     * Instagram, TikTok, Facebook, Reddit, etc.
+     */
     if (originalUrlValue) {
       const outputTemplate = path.join(
         outputDir,
@@ -2888,14 +2897,14 @@ exports.downloadDirectMedia = async (req, res) => {
         );
       } else {
         let formatSpec =
-          "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b[ext=mp4][acodec!=none]/b[acodec!=none]";
+          "b[ext=mp4][acodec!=none]/b[acodec!=none]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b";
 
         if (videoFormatId && audioFormatId) {
-          formatSpec = `${videoFormatId}+${audioFormatId}/bv*+ba/b[ext=mp4][acodec!=none]/b[acodec!=none]`;
+          formatSpec = `${videoFormatId}+${audioFormatId}/b[ext=mp4][acodec!=none]/bv*+ba/b`;
         } else if (videoFormatId && (hasAudio === true || hasAudio === "true")) {
-          formatSpec = `${videoFormatId}/b[ext=mp4][acodec!=none]/bv*+ba/b[acodec!=none]`;
+          formatSpec = `${videoFormatId}/b[ext=mp4][acodec!=none]/bv*+ba/b`;
         } else if (videoFormatId) {
-          formatSpec = `${videoFormatId}+ba/${videoFormatId}+bestaudio/bv*+ba/b[acodec!=none]`;
+          formatSpec = `${videoFormatId}+ba/${videoFormatId}+bestaudio/bv*+ba/b[acodec!=none]/b`;
         }
 
         args.push(
@@ -2987,6 +2996,7 @@ exports.downloadDirectMedia = async (req, res) => {
         }
 
         const preferredExt = type === "audio" ? ".mp3" : ".mp4";
+
         const selectedFile =
           files.find((file) => file.endsWith(preferredExt)) || files[0];
 
@@ -3005,20 +3015,6 @@ exports.downloadDirectMedia = async (req, res) => {
           });
         }
 
-        if (type === "video" && !fileHasAudio(filePath)) {
-          safeDeleteFile(filePath);
-
-          isResponded = true;
-          hasFinished = true;
-
-          return sendJsonIfConnected(res, 422, {
-            status: "fail",
-            code: "DOWNLOADED_AUDIO_MISSING",
-            error:
-              "The selected video was prepared without audio. Please try another quality or another public video.",
-          });
-        }
-
         const finalName = `${safeTitle}.${type === "audio" ? "mp3" : "mp4"}`;
 
         outputPathToClean = filePath;
@@ -3031,6 +3027,10 @@ exports.downloadDirectMedia = async (req, res) => {
       return;
     }
 
+    /**
+     * Fallback path:
+     * Only used if frontend sends direct video/audio URLs.
+     */
     if (type === "video" && !videoUrl) {
       hasFinished = true;
 
@@ -3166,20 +3166,6 @@ exports.downloadDirectMedia = async (req, res) => {
         });
       }
 
-      if (type === "video" && !fileHasAudio(outputPath)) {
-        safeDeleteFile(outputPath);
-
-        isResponded = true;
-        hasFinished = true;
-
-        return sendJsonIfConnected(res, 422, {
-          status: "fail",
-          code: "DOWNLOADED_AUDIO_MISSING",
-          error:
-            "The selected video was prepared without audio. Please try another quality.",
-        });
-      }
-
       isResponded = true;
       hasFinished = true;
 
@@ -3188,7 +3174,9 @@ exports.downloadDirectMedia = async (req, res) => {
   } catch (err) {
     hasFinished = true;
 
-    if (clientCancelled || isClientDisconnected(res)) return;
+    if (clientCancelled || isClientDisconnected(res)) {
+      return;
+    }
 
     console.log("Direct download error:", err.message);
 
