@@ -1588,10 +1588,6 @@
 //     });
 //   }
 // };
-
-
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -1619,10 +1615,11 @@ if (!fs.existsSync(previewDir)) {
 }
 
 /**
- * Change this when preview processing changes.
- * It prevents old broken cached previews from being reused.
+ * IMPORTANT:
+ * v14 disables heavy preview conversion.
+ * Preview conversion was causing Render 502/timeouts.
  */
-const PREVIEW_CACHE_VERSION = "v13-final-h264-aac";
+const PREVIEW_CACHE_VERSION = "v14-safe-preview-download-convert";
 
 const previewJobs = new Map();
 
@@ -1666,12 +1663,13 @@ const getContentType = (filePath) => {
 
 const safeDeleteFile = (filePath) => {
   if (!filePath) return;
-
   fs.unlink(filePath, () => {});
 };
 
 const safeDeleteFiles = (filePaths = []) => {
-  filePaths.forEach((filePath) => safeDeleteFile(filePath));
+  for (const filePath of filePaths) {
+    safeDeleteFile(filePath);
+  }
 };
 
 const isClientDisconnected = (res) => {
@@ -1684,6 +1682,17 @@ const sendJsonIfConnected = (res, statusCode, payload) => {
   }
 
   return res.status(statusCode).json(payload);
+};
+
+const isValidPreparedFile = (filePath) => {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+
+    const stat = fs.statSync(filePath);
+    return stat.size > 1024;
+  } catch {
+    return false;
+  }
 };
 
 const getCleanProcessError = (stderr = "") => {
@@ -1700,7 +1709,7 @@ const getCleanProcessError = (stderr = "") => {
     [...lines]
       .reverse()
       .find((line) =>
-        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate|ffmpeg|codec|libx264|conversion/i.test(
+        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate|ffmpeg|codec|libx264|conversion|killed|memory|timeout/i.test(
           line
         )
       ) || lines[0];
@@ -1862,7 +1871,7 @@ const normalizeErrorMessage = (stderr = "") => {
       statusCode: 500,
       code: "FFMPEG_CODEC_NOT_AVAILABLE",
       error:
-        "FFmpeg on this server does not support the required H.264 encoder.",
+        "FFmpeg on this server does not support H.264 encoding. Please check Render FFmpeg installation.",
     };
   }
 
@@ -1872,17 +1881,6 @@ const normalizeErrorMessage = (stderr = "") => {
     error:
       "Unable to extract this media. Please check the link or try another public video.",
   };
-};
-
-const isValidPreparedFile = (filePath) => {
-  try {
-    if (!fs.existsSync(filePath)) return false;
-
-    const stat = fs.statSync(filePath);
-    return stat.size > 1024;
-  } catch {
-    return false;
-  }
 };
 
 const sendPreparedFile = (res, filePath, downloadName) => {
@@ -1924,399 +1922,12 @@ const sendPreparedFile = (res, filePath, downloadName) => {
   });
 };
 
-const getUrlHash = (value = "") => {
-  return crypto
-    .createHash("sha256")
-    .update(`${PREVIEW_CACHE_VERSION}:${String(value)}`)
-    .digest("hex")
-    .slice(0, 32);
-};
-
-const getPreviewPath = (url) => {
-  const hash = getUrlHash(url);
-  return path.join(previewDir, `${hash}.mp4`);
-};
-
 const getPublicPreviewUrl = (req, originalUrl) => {
   const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
-};
-
-const sendVideoFileWithRange = (req, res, filePath) => {
-  if (!fs.existsSync(filePath)) {
-    return sendJsonIfConnected(res, 404, {
-      status: "fail",
-      code: "PREVIEW_FILE_NOT_FOUND",
-      error: "Preview file not found.",
-    });
-  }
-
-  const stat = fs.statSync(filePath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
-
-  res.setHeader("Content-Type", "video/mp4");
-  res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, proxy-revalidate"
-  );
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("Surrogate-Control", "no-store");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-
-  if (!range) {
-    res.status(200);
-    res.setHeader("Content-Length", fileSize);
-
-    const stream = fs.createReadStream(filePath);
-
-    stream.on("error", (err) => {
-      console.log("Preview file stream error:", err.message);
-
-      if (!res.headersSent) {
-        sendJsonIfConnected(res, 500, {
-          status: "fail",
-          code: "PREVIEW_FILE_STREAM_FAILED",
-          error: "Failed to stream preview file.",
-        });
-      }
-    });
-
-    return stream.pipe(res);
-  }
-
-  const parts = range.replace(/bytes=/, "").split("-");
-  const start = Number.parseInt(parts[0], 10);
-  const end = parts[1] ? Number.parseInt(parts[1], 10) : fileSize - 1;
-
-  if (
-    Number.isNaN(start) ||
-    Number.isNaN(end) ||
-    start >= fileSize ||
-    end >= fileSize ||
-    start > end
-  ) {
-    res.status(416);
-    res.setHeader("Content-Range", `bytes */${fileSize}`);
-    return res.end();
-  }
-
-  const chunkSize = end - start + 1;
-
-  res.status(206);
-  res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
-  res.setHeader("Content-Length", chunkSize);
-
-  const stream = fs.createReadStream(filePath, { start, end });
-
-  stream.on("error", (err) => {
-    console.log("Preview range stream error:", err.message);
-
-    if (!res.headersSent) {
-      sendJsonIfConnected(res, 500, {
-        status: "fail",
-        code: "PREVIEW_RANGE_STREAM_FAILED",
-        error: "Failed to stream preview range.",
-      });
-    }
-  });
-
-  return stream.pipe(res);
-};
-
-/**
- * Browser-safe MP4 conversion.
- *
- * Fixes:
- * - Facebook AV1 video
- * - video-only + audio-only merged streams
- * - browser "No video with supported format and MIME type found"
- */
-const transcodeToBrowserMp4 = (inputPath, outputPath) => {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      FFMPEG_PATH,
-      [
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        inputPath,
-
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "main",
-
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-
-        "-movflags",
-        "+faststart",
-
-        outputPath,
-      ],
-      {
-        timeout: 900000,
-        windowsHide: true,
-      }
-    );
-
-    let stderr = "";
-
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    child.on("error", (err) => {
-      reject(
-        Object.assign(new Error("FFmpeg failed to start."), {
-          details: err.message,
-        })
-      );
-    });
-
-    child.on("close", (code) => {
-      if (code !== 0) {
-        return reject(
-          Object.assign(new Error("FFmpeg H.264/AAC conversion failed."), {
-            details: stderr,
-          })
-        );
-      }
-
-      if (!isValidPreparedFile(outputPath)) {
-        return reject(new Error("Converted MP4 file is invalid or empty."));
-      }
-
-      resolve(outputPath);
-    });
-  });
-};
-
-const buildYtDlpPreviewArgs = (url, outputTemplate) => {
-  return [
-    "--no-playlist",
-    "--force-overwrites",
-    "--no-warnings",
-    "--socket-timeout",
-    "30",
-    "-N",
-    "4",
-    "--ffmpeg-location",
-    FFMPEG_PATH,
-
-    /**
-     * Download and merge video + audio first.
-     * Then we convert the result using FFmpeg separately.
-     */
-    "-f",
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bv*+ba/b",
-
-    "--merge-output-format",
-    "mp4",
-    "-o",
-    outputTemplate,
-    url,
-  ];
-};
-
-const createPlayablePreview = (url) => {
-  const outputPath = getPreviewPath(url);
-
-  if (isValidPreparedFile(outputPath)) {
-    return Promise.resolve(outputPath);
-  }
-
-  if (previewJobs.has(url)) {
-    return previewJobs.get(url);
-  }
-
-  const job = new Promise((resolve, reject) => {
-    const hash = getUrlHash(url);
-    const sourcePrefix = `${hash}-source`;
-    const outputTemplate = path.join(previewDir, `${sourcePrefix}.%(ext)s`);
-
-    const child = spawn(YTDLP_PATH, buildYtDlpPreviewArgs(url, outputTemplate), {
-      timeout: 900000,
-      windowsHide: true,
-    });
-
-    let stderr = "";
-
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    child.on("error", (err) => {
-      reject(err);
-    });
-
-    child.on("close", async (code) => {
-      let sourcePath = "";
-
-      try {
-        if (code !== 0) {
-          const friendly = normalizeErrorMessage(stderr);
-
-          return reject(
-            Object.assign(new Error(friendly.error), {
-              statusCode: friendly.statusCode,
-              code: friendly.code,
-              details: stderr,
-            })
-          );
-        }
-
-        const createdFiles = fs
-          .readdirSync(previewDir)
-          .filter((file) => file.startsWith(sourcePrefix));
-
-        if (!createdFiles.length) {
-          return reject(new Error("Preview source file was not created."));
-        }
-
-        const sourceFile = createdFiles
-          .map((file) => {
-            const filePath = path.join(previewDir, file);
-            const stat = fs.statSync(filePath);
-
-            return {
-              file,
-              size: stat.size,
-            };
-          })
-          .sort((a, b) => b.size - a.size)[0]?.file;
-
-        sourcePath = path.join(previewDir, sourceFile);
-
-        if (!isValidPreparedFile(sourcePath)) {
-          safeDeleteFile(sourcePath);
-          return reject(new Error("Preview source file is invalid or empty."));
-        }
-
-        await transcodeToBrowserMp4(sourcePath, outputPath);
-
-        safeDeleteFile(sourcePath);
-
-        resolve(outputPath);
-      } catch (err) {
-        safeDeleteFile(sourcePath);
-        safeDeleteFile(outputPath);
-        reject(err);
-      }
-    });
-  });
-
-  previewJobs.set(url, job);
-
-  job.finally(() => {
-    previewJobs.delete(url);
-  });
-
-  return job;
-};
-
-const cleanupOldFiles = () => {
-  const previewMaxAgeMs = 60 * 60 * 1000;
-  const downloadMaxAgeMs = 30 * 60 * 1000;
-  const now = Date.now();
-
-  const cleanupDir = (dir, maxAgeMs) => {
-    try {
-      const files = fs.readdirSync(dir);
-
-      for (const file of files) {
-        const filePath = path.join(dir, file);
-        const stat = fs.statSync(filePath);
-
-        if (now - stat.mtimeMs > maxAgeMs) {
-          safeDeleteFile(filePath);
-        }
-      }
-    } catch {}
-  };
-
-  cleanupDir(previewDir, previewMaxAgeMs);
-  cleanupDir(outputDir, downloadMaxAgeMs);
-};
-
-setInterval(cleanupOldFiles, 30 * 60 * 1000);
-
-const isMetricOnlyTitle = (value = "") => {
-  const text = String(value).trim().toLowerCase();
-
-  if (!text) return true;
-
-  return (
-    /^\d+(\.\d+)?[kmb]?\s+(views|reactions|shares|comments)/i.test(text) ||
-    text.includes("reactions") ||
-    text.includes("shares") ||
-    text === "follow" ||
-    text === "like" ||
-    text.length < 3
-  );
-};
-
-const getCleanTitle = (data = {}) => {
-  const rawTitle = data.title || data.fulltitle || "";
-  const description = data.description || "";
-  const uploader = data.uploader || "";
-
-  const lines = String(description || "")
-    .split("\n")
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-
-  let title =
-    lines.find((line) => !isMetricOnlyTitle(line)) ||
-    rawTitle ||
-    uploader ||
-    "Video";
-
-  title = String(title)
-    .replace(/\s+/g, " ")
-    .replace(
-      /^\d+(\.\d+)?[KMB]?\s+views\s*·\s*\d+(\.\d+)?[KMB]?\s+reactions\s*\|\s*/i,
-      ""
-    )
-    .replace(/^\d+(\.\d+)?[KMB]?\s+views\s*\|\s*/i, "")
-    .replace(
-      /^\d+(\.\d+)?[KMB]?\s+reactions\s*·\s*\d+(\.\d+)?[KMB]?\s+shares/i,
-      ""
-    )
-    .split("Download the app")[0]
-    .split("LINK IN BIO")[0]
-    .split("Cast:")[0]
-    .split("#")[0]
-    .trim();
-
-  if (title.toLowerCase().includes(" is now streaming")) {
-    title = title.split(/ is now streaming/i)[0].trim();
-  }
-
-  if (isMetricOnlyTitle(title)) {
-    title = uploader || "Video";
-  }
-
-  return title.slice(0, 70) || "Video";
+  return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(
+    originalUrl
+  )}&v=${PREVIEW_CACHE_VERSION}`;
 };
 
 const formatDuration = (seconds) => {
@@ -2571,6 +2182,173 @@ const getSortHeight = (quality = "") => {
   return Number(String(quality).match(/\d+/)?.[0]) || 0;
 };
 
+const isMetricOnlyTitle = (value = "") => {
+  const text = String(value).trim().toLowerCase();
+
+  if (!text) return true;
+
+  return (
+    /^\d+(\.\d+)?[kmb]?\s+(views|reactions|shares|comments)/i.test(text) ||
+    text.includes("reactions") ||
+    text.includes("shares") ||
+    text === "follow" ||
+    text === "like" ||
+    text.length < 3
+  );
+};
+
+const getCleanTitle = (data = {}) => {
+  const rawTitle = data.title || data.fulltitle || "";
+  const description = data.description || "";
+  const uploader = data.uploader || "";
+
+  const lines = String(description || "")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  let title =
+    lines.find((line) => !isMetricOnlyTitle(line)) ||
+    rawTitle ||
+    uploader ||
+    "Video";
+
+  title = String(title)
+    .replace(/\s+/g, " ")
+    .replace(
+      /^\d+(\.\d+)?[KMB]?\s+views\s*·\s*\d+(\.\d+)?[KMB]?\s+reactions\s*\|\s*/i,
+      ""
+    )
+    .replace(/^\d+(\.\d+)?[KMB]?\s+views\s*\|\s*/i, "")
+    .replace(
+      /^\d+(\.\d+)?[KMB]?\s+reactions\s*·\s*\d+(\.\d+)?[KMB]?\s+shares/i,
+      ""
+    )
+    .split("Download the app")[0]
+    .split("LINK IN BIO")[0]
+    .split("Cast:")[0]
+    .split("#")[0]
+    .trim();
+
+  if (title.toLowerCase().includes(" is now streaming")) {
+    title = title.split(/ is now streaming/i)[0].trim();
+  }
+
+  if (isMetricOnlyTitle(title)) {
+    title = uploader || "Video";
+  }
+
+  return title.slice(0, 70) || "Video";
+};
+
+/**
+ * H.264 + AAC conversion only for final download.
+ * Do NOT use this for preview on Render.
+ */
+const transcodeToBrowserMp4 = (inputPath, outputPath) => {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      FFMPEG_PATH,
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        inputPath,
+
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "24",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "main",
+
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+
+        "-movflags",
+        "+faststart",
+
+        outputPath,
+      ],
+      {
+        timeout: 900000,
+        windowsHide: true,
+      }
+    );
+
+    let stderr = "";
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(
+        Object.assign(new Error("FFmpeg failed to start."), {
+          details: err.message,
+        })
+      );
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        return reject(
+          Object.assign(new Error("FFmpeg H.264/AAC conversion failed."), {
+            details: stderr,
+          })
+        );
+      }
+
+      if (!isValidPreparedFile(outputPath)) {
+        return reject(new Error("Converted MP4 file is invalid or empty."));
+      }
+
+      resolve(outputPath);
+    });
+  });
+};
+
+const cleanupOldFiles = () => {
+  const maxAgeMs = 60 * 60 * 1000;
+  const now = Date.now();
+
+  const cleanupDir = (dir) => {
+    try {
+      const files = fs.readdirSync(dir);
+
+      for (const file of files) {
+        const filePath = path.join(dir, file);
+        const stat = fs.statSync(filePath);
+
+        if (now - stat.mtimeMs > maxAgeMs) {
+          safeDeleteFile(filePath);
+        }
+      }
+    } catch {}
+  };
+
+  cleanupDir(previewDir);
+  cleanupDir(outputDir);
+};
+
+setInterval(cleanupOldFiles, 30 * 60 * 1000);
+
+/**
+ * Main media info endpoint.
+ */
 exports.postMedia = async (req, res, next) => {
   try {
     const url = req.body.urls;
@@ -2836,10 +2614,15 @@ exports.postMedia = async (req, res, next) => {
         webpage_url: originalPageUrl,
         aspectRatio: bestPreview?.aspectRatio || "landscape",
 
+        /**
+         * Preview is intentionally lightweight.
+         * If preview fails, frontend should show thumbnail and allow download.
+         */
         previewUrl: playablePreviewUrl,
-        previewMode: "server-prepared",
-        previewHasAudio: true,
-        previewAudioUrl: "",
+        previewMode: "safe-preview",
+        previewHasAudio: Boolean(bestPreview?.hasAudio),
+        previewAudioUrl:
+          bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl : "",
 
         rawPreviewUrl: bestPreview?.url || "",
         rawPreviewHasAudio: Boolean(bestPreview?.hasAudio),
@@ -2872,42 +2655,19 @@ exports.postMedia = async (req, res, next) => {
   }
 };
 
+/**
+ * Safe preview endpoint.
+ *
+ * It does NOT transcode video on Render.
+ * Heavy preview conversion caused 502/timeouts.
+ */
 exports.previewMedia = async (req, res) => {
-  try {
-    const url = req.query.url;
-
-    if (
-      !url ||
-      typeof url !== "string" ||
-      (!url.startsWith("http://") && !url.startsWith("https://"))
-    ) {
-      return res.status(400).json({
-        status: "fail",
-        code: "INVALID_PREVIEW_URL",
-        error: "Valid preview URL is required.",
-      });
-    }
-
-    const previewPath = await createPlayablePreview(url);
-
-    return sendVideoFileWithRange(req, res, previewPath);
-  } catch (err) {
-    console.log("Preview prepare error:", err.message);
-    console.log("Preview prepare details:", err.details || "");
-
-    if (res.headersSent || res.destroyed || res.writableEnded) {
-      return;
-    }
-
-    return sendJsonIfConnected(res, err.statusCode || 500, {
-      status: "fail",
-      code: err.code || "PREVIEW_STREAM_FAILED",
-      error:
-        err.message ||
-        "Preview could not be prepared. This video may be restricted.",
-      details: err.details || err.message,
-    });
-  }
+  return res.status(422).json({
+    status: "fail",
+    code: "PREVIEW_NOT_AVAILABLE",
+    error:
+      "Preview is not available for this video on this server. Please use download instead.",
+  });
 };
 
 exports.downloadDirectMedia = async (req, res) => {
@@ -2942,6 +2702,12 @@ exports.downloadDirectMedia = async (req, res) => {
   });
 
   try {
+    /**
+     * Keep connections alive during long download/conversion.
+     */
+    req.setTimeout?.(0);
+    res.setTimeout?.(0);
+
     const {
       type,
       title,
@@ -3112,6 +2878,10 @@ exports.downloadDirectMedia = async (req, res) => {
           }
 
           if (type === "video") {
+            /**
+             * This is the key step:
+             * AV1/video-only + audio-only -> H.264 + AAC MP4
+             */
             await transcodeToBrowserMp4(sourcePath, outputPath);
             safeDeleteFile(sourcePath);
 
@@ -3211,7 +2981,7 @@ exports.downloadDirectMedia = async (req, res) => {
         "-preset",
         "veryfast",
         "-crf",
-        "23",
+        "24",
         "-pix_fmt",
         "yuv420p",
         "-profile:v",
