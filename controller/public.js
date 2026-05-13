@@ -1616,7 +1616,11 @@ if (!fs.existsSync(previewDir)) {
   fs.mkdirSync(previewDir, { recursive: true });
 }
 
-const PREVIEW_CACHE_VERSION = "v10-facebook-audio-merge";
+/**
+ * Change this whenever preview/download processing changes.
+ */
+const PREVIEW_CACHE_VERSION = "v11-h264-aac-preview";
+
 const previewJobs = new Map();
 
 const sanitizeFileName = (value = "linkflow-download") => {
@@ -1688,7 +1692,7 @@ const getCleanProcessError = (stderr = "") => {
     [...lines]
       .reverse()
       .find((line) =>
-        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate/i.test(
+        /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate|ffmpeg|codec/i.test(
           line
         )
       ) || lines[0];
@@ -1699,15 +1703,14 @@ const getCleanProcessError = (stderr = "") => {
 const normalizeErrorMessage = (stderr = "") => {
   const lowerError = String(stderr || "").toLowerCase();
 
-  const isRateLimited =
+  if (
     lowerError.includes("429") ||
     lowerError.includes("too many requests") ||
     lowerError.includes("rate limit") ||
     lowerError.includes("rate-limit") ||
     lowerError.includes("rate-limited") ||
-    lowerError.includes("ratelimited");
-
-  if (isRateLimited) {
+    lowerError.includes("ratelimited")
+  ) {
     return {
       statusCode: 429,
       code: "RATE_LIMITED",
@@ -1716,7 +1719,7 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isYouTubeBlocked =
+  if (
     lowerError.includes("[youtube]") &&
     (lowerError.includes("sign in to confirm") ||
       lowerError.includes("not a bot") ||
@@ -1724,9 +1727,8 @@ const normalizeErrorMessage = (stderr = "") => {
       lowerError.includes("cookies-from-browser") ||
       lowerError.includes("use --cookies") ||
       lowerError.includes("robot") ||
-      lowerError.includes("bot"));
-
-  if (isYouTubeBlocked) {
+      lowerError.includes("bot"))
+  ) {
     return {
       statusCode: 403,
       code: "YOUTUBE_BLOCKED_ON_SERVER",
@@ -1735,10 +1737,7 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isInstagramError =
-    lowerError.includes("[instagram]") || lowerError.includes("instagram");
-
-  if (isInstagramError) {
+  if (lowerError.includes("[instagram]") || lowerError.includes("instagram")) {
     if (
       lowerError.includes("rate-limit") ||
       lowerError.includes("rate limit") ||
@@ -1768,12 +1767,11 @@ const normalizeErrorMessage = (stderr = "") => {
     }
   }
 
-  const isForbidden =
+  if (
     lowerError.includes("403") ||
     lowerError.includes("forbidden") ||
-    lowerError.includes("access denied");
-
-  if (isForbidden) {
+    lowerError.includes("access denied")
+  ) {
     return {
       statusCode: 403,
       code: "PLATFORM_FORBIDDEN",
@@ -1782,10 +1780,7 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isRedditError =
-    lowerError.includes("[reddit]") || lowerError.includes("reddit");
-
-  if (isRedditError) {
+  if (lowerError.includes("[reddit]") || lowerError.includes("reddit")) {
     return {
       statusCode: 422,
       code: "REDDIT_EXTRACT_FAILED",
@@ -1794,12 +1789,11 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isFacebookError =
+  if (
     lowerError.includes("[facebook]") ||
     lowerError.includes("facebook") ||
-    lowerError.includes("cannot parse data");
-
-  if (isFacebookError) {
+    lowerError.includes("cannot parse data")
+  ) {
     return {
       statusCode: 422,
       code: "FACEBOOK_EXTRACT_FAILED",
@@ -1808,16 +1802,15 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isCookieError =
+  if (
     lowerError.includes("cookies") ||
     lowerError.includes("login") ||
     lowerError.includes("private") ||
     lowerError.includes("not available") ||
     lowerError.includes("sign in") ||
     lowerError.includes("authentication") ||
-    lowerError.includes("account");
-
-  if (isCookieError) {
+    lowerError.includes("account")
+  ) {
     return {
       statusCode: 401,
       code: "LOGIN_OR_COOKIES_REQUIRED",
@@ -1826,12 +1819,11 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const isUnsupportedError =
+  if (
     lowerError.includes("unsupported url") ||
     lowerError.includes("no suitable extractor") ||
-    lowerError.includes("not a valid url");
-
-  if (isUnsupportedError) {
+    lowerError.includes("not a valid url")
+  ) {
     return {
       statusCode: 400,
       code: "UNSUPPORTED_URL",
@@ -1840,12 +1832,11 @@ const normalizeErrorMessage = (stderr = "") => {
     };
   }
 
-  const noFormats =
+  if (
     lowerError.includes("no video formats found") ||
     lowerError.includes("requested format is not available") ||
-    lowerError.includes("no formats found");
-
-  if (noFormats) {
+    lowerError.includes("no formats found")
+  ) {
     return {
       statusCode: 422,
       code: "NO_FORMATS_FOUND",
@@ -2015,6 +2006,18 @@ const sendVideoFileWithRange = (req, res, filePath) => {
   return stream.pipe(res);
 };
 
+/**
+ * This is the important fix:
+ * Facebook gives AV1 video-only + m4a audio.
+ * We merge them, then force H.264 + AAC for browser playback.
+ */
+const getCompatibleVideoPostProcessorArgs = () => {
+  return [
+    "--postprocessor-args",
+    "ffmpeg:-c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 160k -movflags +faststart",
+  ];
+};
+
 const buildYtDlpPreviewArgs = (url, outputTemplate) => {
   return [
     "--no-playlist",
@@ -2024,21 +2027,13 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
     "30",
     "-N",
     "4",
+    "--ffmpeg-location",
+    FFMPEG_PATH,
     "-f",
-
-    /**
-     * Important:
-     * Facebook reels often expose video-only mp4 + separate m4a audio.
-     * This forces yt-dlp to merge video+audio before falling back.
-     */
     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bv*+ba/b",
-
     "--merge-output-format",
     "mp4",
-    "--recode-video",
-    "mp4",
-    "--postprocessor-args",
-    "ffmpeg:-movflags +faststart",
+    ...getCompatibleVideoPostProcessorArgs(),
     "-o",
     outputTemplate,
     url,
@@ -2061,7 +2056,7 @@ const createPlayablePreview = (url) => {
     const outputTemplate = path.join(previewDir, `${hash}.%(ext)s`);
 
     const child = spawn(YTDLP_PATH, buildYtDlpPreviewArgs(url, outputTemplate), {
-      timeout: 600000,
+      timeout: 900000,
       windowsHide: true,
     });
 
@@ -2589,13 +2584,6 @@ exports.postMedia = async (req, res, next) => {
             aspectRatio: "audio",
           };
         })
-        .filter(
-          (item, index, self) =>
-            index ===
-            self.findIndex(
-              (x) => x.quality === item.quality && x.ext === item.ext
-            )
-        )
         .sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0))
         .slice(0, 8);
 
@@ -2652,11 +2640,11 @@ exports.postMedia = async (req, res, next) => {
             item.vcodec &&
             item.vcodec !== "none" &&
             item.vcodec !== "unknown" &&
-            ["mp4", "webm"].includes(item.ext)
+            ["mp4", "webm"].includes(item.ext) &&
+            (!item.acodec ||
+              item.acodec === "none" ||
+              item.acodec === "unknown")
           );
-        })
-        .filter((item) => {
-          return !item.acodec || item.acodec === "none" || item.acodec === "unknown";
         })
         .map((item) => {
           const sizeInfo = getFormatSizeInfo(item, data.duration, "video");
@@ -2679,8 +2667,7 @@ exports.postMedia = async (req, res, next) => {
 
             /**
              * Critical:
-             * Facebook reels expose video-only stream + separate audio stream.
-             * Attach best audio format ID to every video-only format.
+             * attach audio to video-only formats.
              */
             audioUrl: bestAudio?.url || "",
             audioFormatId: bestAudio?.formatId || "",
@@ -2711,9 +2698,6 @@ exports.postMedia = async (req, res, next) => {
 
           if (a.ext === "mp4" && b.ext !== "mp4") return -1;
           if (a.ext !== "mp4" && b.ext === "mp4") return 1;
-
-          if (a.hasAudio && !b.hasAudio) return -1;
-          if (!a.hasAudio && b.hasAudio) return 1;
 
           return Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0);
         })
@@ -2884,6 +2868,8 @@ exports.downloadDirectMedia = async (req, res) => {
         "30",
         "-N",
         "4",
+        "--ffmpeg-location",
+        FFMPEG_PATH,
       ];
 
       if (type === "audio") {
@@ -2912,10 +2898,7 @@ exports.downloadDirectMedia = async (req, res) => {
           formatSpec,
           "--merge-output-format",
           "mp4",
-          "--recode-video",
-          "mp4",
-          "--postprocessor-args",
-          "ffmpeg:-movflags +faststart",
+          ...getCompatibleVideoPostProcessorArgs(),
           "-o",
           outputTemplate,
           originalUrlValue
@@ -2923,7 +2906,7 @@ exports.downloadDirectMedia = async (req, res) => {
       }
 
       childProcess = spawn(YTDLP_PATH, args, {
-        timeout: 600000,
+        timeout: 900000,
         windowsHide: true,
       });
 
@@ -3084,11 +3067,15 @@ exports.downloadDirectMedia = async (req, res) => {
         "-map",
         "1:a:0",
         "-c:v",
-        "copy",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        "160k",
         "-movflags",
         "+faststart",
         "-shortest",
@@ -3097,7 +3084,7 @@ exports.downloadDirectMedia = async (req, res) => {
     }
 
     childProcess = spawn(FFMPEG_PATH, args, {
-      timeout: 600000,
+      timeout: 900000,
       windowsHide: true,
     });
 
