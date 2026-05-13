@@ -1616,12 +1616,7 @@ if (!fs.existsSync(previewDir)) {
   fs.mkdirSync(previewDir, { recursive: true });
 }
 
-/**
- * Change this when preview logic changes.
- * This prevents old silent/broken cached previews from being reused.
- */
-const PREVIEW_CACHE_VERSION = "v9-preview-stable";
-
+const PREVIEW_CACHE_VERSION = "v10-facebook-audio-merge";
 const previewJobs = new Map();
 
 const sanitizeFileName = (value = "linkflow-download") => {
@@ -2029,14 +2024,14 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
     "30",
     "-N",
     "4",
+    "-f",
 
     /**
-     * Stable preview:
-     * Always try video + audio first.
-     * This prevents silent preview when audio exists.
+     * Important:
+     * Facebook reels often expose video-only mp4 + separate m4a audio.
+     * This forces yt-dlp to merge video+audio before falling back.
      */
-    "-f",
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bv*+ba/b",
 
     "--merge-output-format",
     "mp4",
@@ -2565,7 +2560,7 @@ exports.postMedia = async (req, res, next) => {
             item.url &&
             item.acodec &&
             item.acodec !== "none" &&
-            (!item.vcodec || item.vcodec === "none")
+            item.vcodec === "none"
           );
         })
         .map((item) => {
@@ -2601,6 +2596,7 @@ exports.postMedia = async (req, res, next) => {
               (x) => x.quality === item.quality && x.ext === item.ext
             )
         )
+        .sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0))
         .slice(0, 8);
 
       const bestAudio =
@@ -2614,8 +2610,10 @@ exports.postMedia = async (req, res, next) => {
             item.url &&
             item.vcodec &&
             item.vcodec !== "none" &&
+            item.vcodec !== "unknown" &&
             item.acodec &&
             item.acodec !== "none" &&
+            item.acodec !== "unknown" &&
             ["mp4", "webm"].includes(item.ext)
           );
         })
@@ -2653,9 +2651,12 @@ exports.postMedia = async (req, res, next) => {
             item.url &&
             item.vcodec &&
             item.vcodec !== "none" &&
-            (!item.acodec || item.acodec === "none") &&
+            item.vcodec !== "unknown" &&
             ["mp4", "webm"].includes(item.ext)
           );
+        })
+        .filter((item) => {
+          return !item.acodec || item.acodec === "none" || item.acodec === "unknown";
         })
         .map((item) => {
           const sizeInfo = getFormatSizeInfo(item, data.duration, "video");
@@ -2675,8 +2676,15 @@ exports.postMedia = async (req, res, next) => {
             vcodec: item.vcodec || "",
             acodec: item.acodec || "none",
             hasAudio: false,
+
+            /**
+             * Critical:
+             * Facebook reels expose video-only stream + separate audio stream.
+             * Attach best audio format ID to every video-only format.
+             */
             audioUrl: bestAudio?.url || "",
             audioFormatId: bestAudio?.formatId || "",
+
             aspectRatio: getAspectRatio(
               item.width,
               item.height,
@@ -2893,10 +2901,10 @@ exports.downloadDirectMedia = async (req, res) => {
         );
       } else {
         let formatSpec =
-          "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best";
+          "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bv*+ba/b";
 
         if (videoFormatId && audioFormatId) {
-          formatSpec = `${videoFormatId}+${audioFormatId}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best`;
+          formatSpec = `${videoFormatId}+${audioFormatId}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bv*+ba/b`;
         }
 
         args.push(
