@@ -1620,7 +1620,7 @@ if (!fs.existsSync(previewDir)) {
  * Change this when preview logic changes.
  * This prevents old silent/broken cached previews from being reused.
  */
-const PREVIEW_CACHE_VERSION = "v8-audio-safe-preview";
+const PREVIEW_CACHE_VERSION = "v9-preview-stable";
 
 const previewJobs = new Map();
 
@@ -1951,7 +1951,10 @@ const sendVideoFileWithRange = (req, res, filePath) => {
 
   res.setHeader("Content-Type", "video/mp4");
   res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate"
+  );
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
   res.setHeader("Surrogate-Control", "no-store");
@@ -2026,13 +2029,15 @@ const buildYtDlpPreviewArgs = (url, outputTemplate) => {
     "30",
     "-N",
     "4",
+
+    /**
+     * Stable preview:
+     * Always try video + audio first.
+     * This prevents silent preview when audio exists.
+     */
     "-f",
-    [
-      "best[ext=mp4][acodec!=none]",
-      "best[acodec!=none]",
-      "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
-      "bestvideo+bestaudio",
-    ].join("/"),
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+
     "--merge-output-format",
     "mp4",
     "--recode-video",
@@ -2887,21 +2892,11 @@ exports.downloadDirectMedia = async (req, res) => {
           originalUrlValue
         );
       } else {
-        let formatSpec = [
-          "best[ext=mp4][acodec!=none]",
-          "best[acodec!=none]",
-          "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
-          "bestvideo+bestaudio",
-        ].join("/");
+        let formatSpec =
+          "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best";
 
         if (videoFormatId && audioFormatId) {
-          formatSpec = [
-            `${videoFormatId}+${audioFormatId}`,
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
-            "bestvideo+bestaudio",
-            "best[ext=mp4][acodec!=none]",
-            "best[acodec!=none]",
-          ].join("/");
+          formatSpec = `${videoFormatId}+${audioFormatId}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best`;
         }
 
         args.push(
