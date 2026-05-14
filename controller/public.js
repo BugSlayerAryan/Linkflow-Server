@@ -3418,9 +3418,6 @@
 
 
 
-
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -3435,7 +3432,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v22";
+const PREVIEW_MODE = "raw-preview-download-audio-v23";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -4182,11 +4179,15 @@ const chooseStrictAudioVideoFormatSpec = ({
     "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720][acodec!=none]/best[acodec!=none]";
 
   if (videoFormatId && audioFormatId) {
-    return `${videoFormatId}+${audioFormatId}/${fallback}`;
+    return `${videoFormatId}+${audioFormatId}/${videoFormatId}+bestaudio[ext=m4a]/${videoFormatId}+bestaudio/${fallback}`;
   }
 
   if (videoFormatId && hasAudio) {
     return `${videoFormatId}/${fallback}`;
+  }
+
+  if (videoFormatId) {
+    return `${videoFormatId}+bestaudio[ext=m4a]/${videoFormatId}+bestaudio/${fallback}`;
   }
 
   return fallback;
@@ -4603,12 +4604,25 @@ exports.postMedia = async (req, res, next) => {
         })
         .slice(0, 10);
 
+      const sourceNormalized = getNormalizedDimensions(data);
+      const sourceAspectRatio = getAspectRatio(
+        sourceNormalized.width,
+        sourceNormalized.height,
+        data.aspect_ratio,
+        sourceNormalized.rotation
+      );
+
       const bestPreview =
         videoFormats.find((item) => item.hasAudio && item.ext === "mp4") ||
         videoFormats.find((item) => item.ext === "mp4") ||
         videoFormats.find((item) => item.hasAudio) ||
         videoFormats[0] ||
         null;
+
+      const finalAspectRatio =
+        sourceAspectRatio && sourceAspectRatio !== "landscape"
+          ? sourceAspectRatio
+          : bestPreview?.aspectRatio || "landscape";
 
       const originalPageUrl = data.webpage_url || url;
 
@@ -4626,7 +4640,7 @@ exports.postMedia = async (req, res, next) => {
           formatDuration(data.duration) || data.duration_string || "--",
         viewCount: data.view_count || null,
         webpage_url: originalPageUrl,
-        aspectRatio: bestPreview?.aspectRatio || "landscape",
+        aspectRatio: finalAspectRatio,
 
         previewUrl: bestPreview?.url || "",
         previewMode: PREVIEW_MODE,
