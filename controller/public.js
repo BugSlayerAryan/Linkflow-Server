@@ -12,7 +12,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v18";
+const PREVIEW_MODE = "raw-preview-download-audio-v19";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -281,15 +281,17 @@ const normalizeErrorMessage = (stderr = "") => {
   };
 };
 
-const hasAudioStream = (filePath) => {
+const hasStream = (filePath, streamType) => {
   return new Promise((resolve) => {
+    const selector = streamType === "audio" ? "a:0" : "v:0";
+
     const child = spawn(
       FFPROBE_PATH,
       [
         "-v",
         "error",
         "-select_streams",
-        "a:0",
+        selector,
         "-show_entries",
         "stream=codec_type",
         "-of",
@@ -309,44 +311,7 @@ const hasAudioStream = (filePath) => {
     });
 
     child.on("close", () => {
-      resolve(stdout.trim().includes("audio"));
-    });
-
-    child.on("error", () => {
-      resolve(false);
-    });
-  });
-};
-
-const hasVideoStream = (filePath) => {
-  return new Promise((resolve) => {
-    const child = spawn(
-      FFPROBE_PATH,
-      [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=codec_type",
-        "-of",
-        "csv=p=0",
-        filePath,
-      ],
-      {
-        timeout: 30000,
-        windowsHide: true,
-      }
-    );
-
-    let stdout = "";
-
-    child.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    child.on("close", () => {
-      resolve(stdout.trim().includes("video"));
+      resolve(stdout.trim().includes(streamType));
     });
 
     child.on("error", () => {
@@ -357,8 +322,8 @@ const hasVideoStream = (filePath) => {
 
 const validateVideoHasAudio = async (filePath) => {
   const [videoOk, audioOk] = await Promise.all([
-    hasVideoStream(filePath),
-    hasAudioStream(filePath),
+    hasStream(filePath, "video"),
+    hasStream(filePath, "audio"),
   ]);
 
   return videoOk && audioOk;
@@ -1093,14 +1058,11 @@ exports.postMedia = async (req, res, next) => {
         webpage_url: originalPageUrl,
         aspectRatio: bestPreview?.aspectRatio || "landscape",
 
-        /**
-         * Preview can be raw and may be silent.
-         * This is okay because user accepted preview may not have sound.
-         */
-        previewUrl: "",
+        previewUrl: bestPreview?.url || "",
         previewMode: PREVIEW_MODE,
-        previewHasAudio: false,
-        previewAudioUrl: "",
+        previewHasAudio: Boolean(bestPreview?.hasAudio),
+        previewAudioUrl:
+          bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl : "",
 
         rawPreviewUrl: bestPreview?.url || "",
         rawPreviewHasAudio: Boolean(bestPreview?.hasAudio),
@@ -1138,7 +1100,7 @@ exports.previewMedia = async (req, res) => {
     status: "fail",
     code: "PREVIEW_NOT_AVAILABLE",
     error:
-      "Server preview is disabled on this server. The app may use raw preview instead.",
+      "Server preview is disabled on this server. The app uses raw preview instead.",
   });
 };
 
