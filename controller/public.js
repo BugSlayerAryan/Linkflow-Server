@@ -12,7 +12,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v19";
+const PREVIEW_MODE = "raw-preview-download-audio-v18";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -75,19 +75,14 @@ const isClientDisconnected = (res) => {
 };
 
 const sendJsonIfConnected = (res, statusCode, payload) => {
-  if (res.destroyed || res.writableEnded || res.headersSent) {
-    return;
-  }
-
+  if (res.destroyed || res.writableEnded || res.headersSent) return;
   return res.status(statusCode).json(payload);
 };
 
 const isValidPreparedFile = (filePath) => {
   try {
     if (!fs.existsSync(filePath)) return false;
-
-    const stat = fs.statSync(filePath);
-    return stat.size > 1024;
+    return fs.statSync(filePath).size > 1024;
   } catch {
     return false;
   }
@@ -103,16 +98,17 @@ const getCleanProcessError = (stderr = "") => {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const importantLine =
+  return (
     [...lines]
       .reverse()
       .find((line) =>
         /error|failed|invalid|unable|not found|permission|denied|forbidden|too many requests|sign in|cookies|bot|rate|ffmpeg|ffprobe|codec|libx264|conversion|killed|memory|timeout|audio/i.test(
           line
         )
-      ) || lines[0];
-
-  return importantLine || "Download process failed.";
+      ) ||
+    lines[0] ||
+    "Download process failed."
+  );
 };
 
 const normalizeErrorMessage = (stderr = "") => {
@@ -138,7 +134,6 @@ const normalizeErrorMessage = (stderr = "") => {
     lowerError.includes("[youtube]") &&
     (lowerError.includes("sign in to confirm") ||
       lowerError.includes("not a bot") ||
-      lowerError.includes("confirm you") ||
       lowerError.includes("cookies-from-browser") ||
       lowerError.includes("use --cookies") ||
       lowerError.includes("robot") ||
@@ -170,7 +165,6 @@ const normalizeErrorMessage = (stderr = "") => {
       lowerError.includes("login") ||
       lowerError.includes("cookies") ||
       lowerError.includes("not available") ||
-      lowerError.includes("requested content is not available") ||
       lowerError.includes("private")
     ) {
       return {
@@ -223,8 +217,7 @@ const normalizeErrorMessage = (stderr = "") => {
     lowerError.includes("private") ||
     lowerError.includes("not available") ||
     lowerError.includes("sign in") ||
-    lowerError.includes("authentication") ||
-    lowerError.includes("account")
+    lowerError.includes("authentication")
   ) {
     return {
       statusCode: 401,
@@ -348,7 +341,6 @@ const sendPreparedFile = (res, filePath, downloadName) => {
   );
 
   const stream = fs.createReadStream(filePath);
-
   stream.pipe(res);
 
   stream.on("close", () => {
@@ -404,17 +396,11 @@ const formatSize = (bytes, estimated = false) => {
 
   let label = "";
 
-  if (gb >= 1) {
-    label = `${gb.toFixed(1)} GB`;
-  } else if (mb >= 100) {
-    label = `${Math.round(mb)} MB`;
-  } else if (mb >= 10) {
-    label = `${mb.toFixed(1)} MB`;
-  } else if (mb >= 1) {
-    label = `${mb.toFixed(1)} MB`;
-  } else {
-    label = `${Math.max(1, Math.round(kb))} KB`;
-  }
+  if (gb >= 1) label = `${gb.toFixed(1)} GB`;
+  else if (mb >= 100) label = `${Math.round(mb)} MB`;
+  else if (mb >= 10) label = `${mb.toFixed(1)} MB`;
+  else if (mb >= 1) label = `${mb.toFixed(1)} MB`;
+  else label = `${Math.max(1, Math.round(kb))} KB`;
 
   return estimated ? `Approx. ${label}` : label;
 };
@@ -430,10 +416,7 @@ const getDirectSizeBytes = (item = {}) => {
 
   for (const candidate of candidates) {
     const value = Number(candidate);
-
-    if (value && !Number.isNaN(value) && value > 0) {
-      return value;
-    }
+    if (value && !Number.isNaN(value) && value > 0) return value;
   }
 
   return null;
@@ -441,10 +424,7 @@ const getDirectSizeBytes = (item = {}) => {
 
 const estimateSizeFromBitrate = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
-
-  if (!duration || Number.isNaN(duration) || duration <= 0) {
-    return null;
-  }
+  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
 
   const bitrateKbps =
     Number(item.tbr || 0) ||
@@ -478,10 +458,7 @@ const getEstimatedVideoBitrateKbps = (item = {}) => {
 
 const estimateVideoSizeFromResolution = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
-
-  if (!duration || Number.isNaN(duration) || duration <= 0) {
-    return null;
-  }
+  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
 
   let bitrateKbps = getEstimatedVideoBitrateKbps(item);
 
@@ -494,10 +471,7 @@ const estimateVideoSizeFromResolution = (item = {}, durationSeconds) => {
 
 const estimateAudioSize = (item = {}, durationSeconds) => {
   const duration = Number(durationSeconds || item.duration || 0);
-
-  if (!duration || Number.isNaN(duration) || duration <= 0) {
-    return null;
-  }
+  if (!duration || Number.isNaN(duration) || duration <= 0) return null;
 
   const bitrateKbps =
     Number(item.abr || 0) ||
@@ -512,16 +486,11 @@ const getFallbackSizeBytes = (type = "video", durationSeconds) => {
   const duration = Number(durationSeconds || 0);
 
   if (duration && !Number.isNaN(duration) && duration > 0) {
-    if (type === "audio") {
-      return (128 * 1000 * duration) / 8;
-    }
-
+    if (type === "audio") return (128 * 1000 * duration) / 8;
     return (900 * 1000 * duration) / 8;
   }
 
-  if (type === "audio") {
-    return 512 * 1024;
-  }
+  if (type === "audio") return 512 * 1024;
 
   return 2 * 1024 * 1024;
 };
@@ -600,9 +569,7 @@ const getQualityLabel = (item = {}) => {
   if (height >= 360) return "360p";
   if (height >= 240) return "240p";
 
-  if (item.width && item.height) {
-    return `${item.width}×${item.height}`;
-  }
+  if (item.width && item.height) return `${item.width}×${item.height}`;
 
   return item.format_note || item.resolution || item.format_id || "Default";
 };
@@ -1130,9 +1097,7 @@ exports.downloadDirectMedia = async (req, res) => {
   req.on("aborted", cleanupProcess);
 
   res.on("close", () => {
-    if (!hasFinished) {
-      cleanupProcess();
-    }
+    if (!hasFinished) cleanupProcess();
   });
 
   try {
@@ -1532,9 +1497,7 @@ exports.downloadDirectMedia = async (req, res) => {
   } catch (err) {
     hasFinished = true;
 
-    if (clientCancelled || isClientDisconnected(res)) {
-      return;
-    }
+    if (clientCancelled || isClientDisconnected(res)) return;
 
     console.log("Direct download error:", err.message);
 
