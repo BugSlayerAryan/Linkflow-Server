@@ -3425,9 +3425,6 @@
 
 
 
-
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -3442,7 +3439,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v20";
+const PREVIEW_MODE = "raw-preview-download-audio-v21";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -4102,16 +4099,23 @@ const getQualityLabel = (item = {}) => {
 };
 
 const getSortHeight = (quality = "") => {
-  if (quality.includes("4320")) return 4320;
-  if (quality.includes("2160")) return 2160;
-  if (quality.includes("1440")) return 1440;
-  if (quality.includes("1080")) return 1080;
-  if (quality.includes("720")) return 720;
-  if (quality.includes("480")) return 480;
-  if (quality.includes("360")) return 360;
-  if (quality.includes("240")) return 240;
+  const text = String(quality || "").toLowerCase();
 
-  return Number(String(quality).match(/\d+/)?.[0]) || 0;
+  if (text.includes("4320") || text.includes("8k")) return 4320;
+  if (text.includes("2160") || text.includes("4k")) return 2160;
+  if (text.includes("1440") || text.includes("2k")) return 1440;
+  if (text.includes("1080") || text.includes("full hd") || text.includes("fhd")) return 1080;
+  if (text.includes("720") || /^hd$/.test(text) || text.includes(" hd")) return 720;
+  if (text.includes("480") || /^sd$/.test(text) || text.includes(" sd")) return 480;
+  if (text.includes("360")) return 360;
+  if (text.includes("240")) return 240;
+  if (text.includes("144")) return 144;
+
+  return Number(text.match(/\d+/)?.[0]) || 0;
+};
+
+const getQualityRank = (item = {}) => {
+  return Number(item.qualityRank || 0) || getFormatHeight(item) || getSortHeight(item.quality);
 };
 
 const isMetricOnlyTitle = (value = "") => {
@@ -4486,12 +4490,8 @@ exports.postMedia = async (req, res, next) => {
           return {
             type: "video",
             url: item.url,
-            quality:
-              formatId === "sd" || formatNote === "sd"
-                ? "SD"
-                : formatId === "hd" || formatNote === "hd"
-                ? "HD"
-                : getQualityLabel(item),
+            quality: getQualityLabel(normalizedItem),
+            qualityRank: getFormatHeight(normalizedItem),
             ext,
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
@@ -4506,10 +4506,9 @@ exports.postMedia = async (req, res, next) => {
             audioUrl: "",
             audioFormatId: "",
             aspectRatio: getAspectRatio(
-              item.width,
-              item.height,
-              item.aspect_ratio,
-              normalized.rotation
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio
             ),
             rotation: normalized.rotation,
           };
@@ -4541,7 +4540,8 @@ exports.postMedia = async (req, res, next) => {
           return {
             type: "video",
             url: item.url,
-            quality: getQualityLabel(item),
+            quality: getQualityLabel(normalizedItem),
+            qualityRank: getFormatHeight(normalizedItem),
             ext: item.ext || "mp4",
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
@@ -4556,63 +4556,61 @@ exports.postMedia = async (req, res, next) => {
             audioUrl: bestAudio?.url || "",
             audioFormatId: bestAudio?.formatId || "",
             aspectRatio: getAspectRatio(
-              item.width,
-              item.height,
-              item.aspect_ratio,
-              normalized.rotation
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio
             ),
             rotation: normalized.rotation,
           };
         });
 
-      const videoFormats = [...progressiveVideoFormats, ...dashVideoFormats]
-        .filter(
-          (item, index, self) =>
-            index ===
-            self.findIndex(
-              (x) =>
-                x.quality === item.quality &&
-                x.ext === item.ext &&
-                x.aspectRatio === item.aspectRatio
-            )
-        )
+      const combinedVideoFormats = [...progressiveVideoFormats, ...dashVideoFormats];
+      const uniqueVideoFormatMap = new Map();
+
+      for (const item of combinedVideoFormats) {
+        const rank = getQualityRank(item);
+        const key = `${rank}-${item.ext}-${item.aspectRatio}`;
+        const current = uniqueVideoFormatMap.get(key);
+
+        if (!current) {
+          uniqueVideoFormatMap.set(key, item);
+          continue;
+        }
+
+        const currentScore =
+          (current.hasAudio ? 100000 : 0) +
+          (current.ext === "mp4" ? 10000 : 0) +
+          Number(current.sizeBytes || 0) / 100000000;
+
+        const itemScore =
+          (item.hasAudio ? 100000 : 0) +
+          (item.ext === "mp4" ? 10000 : 0) +
+          Number(item.sizeBytes || 0) / 100000000;
+
+        if (itemScore > currentScore) {
+          uniqueVideoFormatMap.set(key, item);
+        }
+      }
+
+      const videoFormats = [...uniqueVideoFormatMap.values()]
         .sort((a, b) => {
-          const aFormat = String(a.formatId || "").toLowerCase();
-          const bFormat = String(b.formatId || "").toLowerCase();
-
-          /**
-           * Prefer Facebook combined SD/HD first for preview.
-           */
-          const aCombinedFacebook =
-            a.hasAudio && a.ext === "mp4" && ["sd", "hd"].includes(aFormat);
-          const bCombinedFacebook =
-            b.hasAudio && b.ext === "mp4" && ["sd", "hd"].includes(bFormat);
-
-          if (aCombinedFacebook && !bCombinedFacebook) return -1;
-          if (!aCombinedFacebook && bCombinedFacebook) return 1;
-
-          if (a.hasAudio && !b.hasAudio) return -1;
-          if (!a.hasAudio && b.hasAudio) return 1;
-
-          const byHeight = getSortHeight(b.quality) - getSortHeight(a.quality);
-          if (byHeight !== 0) return byHeight;
+          const byQuality = getQualityRank(b) - getQualityRank(a);
+          if (byQuality !== 0) return byQuality;
 
           if (a.ext === "mp4" && b.ext !== "mp4") return -1;
           if (a.ext !== "mp4" && b.ext === "mp4") return 1;
+
+          if (a.hasAudio && !b.hasAudio) return -1;
+          if (!a.hasAudio && b.hasAudio) return 1;
 
           return Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0);
         })
         .slice(0, 10);
 
       const bestPreview =
-        videoFormats.find(
-          (item) =>
-            item.hasAudio &&
-            item.ext === "mp4" &&
-            ["sd", "hd"].includes(String(item.formatId || "").toLowerCase())
-        ) ||
         videoFormats.find((item) => item.hasAudio && item.ext === "mp4") ||
         videoFormats.find((item) => item.ext === "mp4") ||
+        videoFormats.find((item) => item.hasAudio) ||
         videoFormats[0] ||
         null;
 
