@@ -893,27 +893,68 @@ exports.postMedia = async (req, res, next) => {
         audioFormats[0] ||
         null;
 
+      /**
+       * IMPORTANT FIX:
+       * Facebook often gives "sd" / "hd" MP4 formats with vcodec/acodec = unknown.
+       * Those can be combined video+audio and worked in your older version.
+       * So we keep them as progressive combined preview candidates.
+       */
       const progressiveVideoFormats = allFormats
         .filter((item) => {
+          const ext = String(item.ext || "").toLowerCase();
+          const formatId = String(item.format_id || "").toLowerCase();
+          const formatNote = String(item.format_note || "").toLowerCase();
+
+          const hasKnownVideo =
+            item.vcodec && item.vcodec !== "none" && item.vcodec !== "unknown";
+
+          const hasKnownAudio =
+            item.acodec && item.acodec !== "none" && item.acodec !== "unknown";
+
+          const isLikelyFacebookCombined =
+            item.url &&
+            ext === "mp4" &&
+            (formatId === "sd" ||
+              formatId === "hd" ||
+              formatNote === "sd" ||
+              formatNote === "hd") &&
+            (!item.vcodec || item.vcodec === "unknown") &&
+            (!item.acodec || item.acodec === "unknown");
+
           return (
             item.url &&
-            item.vcodec &&
-            item.vcodec !== "none" &&
-            item.vcodec !== "unknown" &&
-            item.acodec &&
-            item.acodec !== "none" &&
-            item.acodec !== "unknown" &&
-            ["mp4", "webm"].includes(item.ext)
+            ["mp4", "webm"].includes(ext) &&
+            ((hasKnownVideo && hasKnownAudio) || isLikelyFacebookCombined)
           );
         })
         .map((item) => {
           const sizeInfo = getFormatSizeInfo(item, data.duration, "video");
+          const ext = item.ext || "mp4";
+          const formatId = String(item.format_id || "").toLowerCase();
+          const formatNote = String(item.format_note || "").toLowerCase();
+
+          const hasKnownAudio =
+            item.acodec && item.acodec !== "none" && item.acodec !== "unknown";
+
+          const isLikelyCombinedUnknown =
+            String(ext).toLowerCase() === "mp4" &&
+            (formatId === "sd" ||
+              formatId === "hd" ||
+              formatNote === "sd" ||
+              formatNote === "hd") &&
+            (!item.vcodec || item.vcodec === "unknown") &&
+            (!item.acodec || item.acodec === "unknown");
 
           return {
             type: "video",
             url: item.url,
-            quality: getQualityLabel(item),
-            ext: item.ext || "mp4",
+            quality:
+              formatId === "sd" || formatNote === "sd"
+                ? "SD"
+                : formatId === "hd" || formatNote === "hd"
+                ? "HD"
+                : getQualityLabel(item),
+            ext,
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
             sizeEstimated: sizeInfo.sizeEstimated,
@@ -923,7 +964,7 @@ exports.postMedia = async (req, res, next) => {
             fps: item.fps || null,
             vcodec: item.vcodec || "",
             acodec: item.acodec || "",
-            hasAudio: true,
+            hasAudio: Boolean(hasKnownAudio || isLikelyCombinedUnknown),
             audioUrl: "",
             audioFormatId: "",
             aspectRatio: getAspectRatio(
@@ -987,21 +1028,40 @@ exports.postMedia = async (req, res, next) => {
             )
         )
         .sort((a, b) => {
-          const byHeight = getSortHeight(b.quality) - getSortHeight(a.quality);
+          const aFormat = String(a.formatId || "").toLowerCase();
+          const bFormat = String(b.formatId || "").toLowerCase();
 
+          /**
+           * Prefer Facebook combined SD/HD first for preview.
+           */
+          const aCombinedFacebook =
+            a.hasAudio && a.ext === "mp4" && ["sd", "hd"].includes(aFormat);
+          const bCombinedFacebook =
+            b.hasAudio && b.ext === "mp4" && ["sd", "hd"].includes(bFormat);
+
+          if (aCombinedFacebook && !bCombinedFacebook) return -1;
+          if (!aCombinedFacebook && bCombinedFacebook) return 1;
+
+          if (a.hasAudio && !b.hasAudio) return -1;
+          if (!a.hasAudio && b.hasAudio) return 1;
+
+          const byHeight = getSortHeight(b.quality) - getSortHeight(a.quality);
           if (byHeight !== 0) return byHeight;
 
           if (a.ext === "mp4" && b.ext !== "mp4") return -1;
           if (a.ext !== "mp4" && b.ext === "mp4") return 1;
-
-          if (a.hasAudio && !b.hasAudio) return -1;
-          if (!a.hasAudio && b.hasAudio) return 1;
 
           return Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0);
         })
         .slice(0, 10);
 
       const bestPreview =
+        videoFormats.find(
+          (item) =>
+            item.hasAudio &&
+            item.ext === "mp4" &&
+            ["sd", "hd"].includes(String(item.formatId || "").toLowerCase())
+        ) ||
         videoFormats.find((item) => item.hasAudio && item.ext === "mp4") ||
         videoFormats.find((item) => item.ext === "mp4") ||
         videoFormats[0] ||
