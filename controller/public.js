@@ -3421,10 +3421,6 @@
 
 
 
-
-
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -3439,7 +3435,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v21";
+const PREVIEW_MODE = "raw-preview-download-audio-v22";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
