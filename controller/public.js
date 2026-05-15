@@ -3417,7 +3417,6 @@
 
 
 
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -3432,7 +3431,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v23";
+const PREVIEW_MODE = "raw-preview-download-audio-v24";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -4757,7 +4756,7 @@ exports.downloadDirectMedia = async (req, res) => {
         "--socket-timeout",
         "30",
         "-N",
-        "4",
+        "8",
         "--ffmpeg-location",
         FFMPEG_PATH,
       ];
@@ -4889,15 +4888,25 @@ exports.downloadDirectMedia = async (req, res) => {
             });
           }
 
+          let finalPath = sourcePath;
+
           if (type === "video") {
-            await transcodeToBrowserMp4(sourcePath, outputPath);
-            safeDeleteFile(sourcePath);
-            outputPathToClean = outputPath;
+            const sourceExt = path.extname(sourcePath).toLowerCase();
+            const sourceHasVideoAndAudio = await validateVideoHasAudio(sourcePath);
+
+            if (sourceExt === ".mp4" && sourceHasVideoAndAudio) {
+              outputPathToClean = sourcePath;
+              finalPath = sourcePath;
+            } else {
+              await transcodeToBrowserMp4(sourcePath, outputPath);
+              safeDeleteFile(sourcePath);
+              outputPathToClean = outputPath;
+              finalPath = outputPath;
+            }
           } else {
             outputPathToClean = sourcePath;
           }
 
-          const finalPath = type === "video" ? outputPath : sourcePath;
           const finalName = `${safeTitle}.${type === "audio" ? "mp3" : "mp4"}`;
 
           if (type === "video") {
