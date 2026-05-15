@@ -3419,6 +3419,7 @@
 
 
 
+
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -4367,18 +4368,30 @@ exports.postMedia = async (req, res, next) => {
       stderr += data.toString();
     });
 
-    ytDlp.on("error", (err) => {
+    ytDlp.on("error", async (err) => {
       if (isResponded) return;
-      isResponded = true;
 
       console.log("yt-dlp process error:", err.message);
 
-      return res.status(500).json({
-        status: "fail",
-        code: "YTDLP_NOT_FOUND",
-        error:
-          "yt-dlp is not installed or failed to start. Please install or update yt-dlp on the server.",
-      });
+      try {
+        const fallbackData = await tryFallbackLayers(url, "YTDLP_PROCESS_ERROR");
+
+        isResponded = true;
+        return res.status(200).json(fallbackData);
+      } catch (fallbackError) {
+        isResponded = true;
+
+        return res.status(500).json({
+          status: "fail",
+          code: "YTDLP_NOT_FOUND",
+          error:
+            "yt-dlp is not installed or failed to start, and fallback also failed.",
+          details: err.message,
+          fallbackTried: true,
+          fallbackError: fallbackError.message,
+          fallbackDetails: fallbackError.details || [],
+        });
+      }
     });
 
     ytDlp.on("close", async (code) => {

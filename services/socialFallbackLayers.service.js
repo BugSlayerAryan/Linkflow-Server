@@ -318,11 +318,8 @@ function normalizeMediaItem(item = {}, context = {}) {
     item.resolution || item.quality || item.label || ""
   );
 
-  const width =
-    item.width || metadata.width || parsedResolution.width || null;
-
-  const height =
-    item.height || metadata.height || parsedResolution.height || null;
+  const width = item.width || metadata.width || parsedResolution.width || null;
+  const height = item.height || metadata.height || parsedResolution.height || null;
 
   const ext = getExtension(item);
   const qualityRank = getQualityRank({ ...item, width, height });
@@ -368,9 +365,7 @@ function normalizeMediaItem(item = {}, context = {}) {
         formatSize(sizeBytes, true),
       sizeBytes,
       sizeEstimated: !sizeBytes,
-      formatId: String(
-        item.id || item.formatId || item.itag || metadata.itag || ""
-      ),
+      formatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
       width: null,
       height: null,
       fps: null,
@@ -378,9 +373,7 @@ function normalizeMediaItem(item = {}, context = {}) {
       acodec: item.codec || item.acodec || "audio",
       hasAudio: true,
       audioUrl: "",
-      audioFormatId: String(
-        item.id || item.formatId || item.itag || metadata.itag || ""
-      ),
+      audioFormatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
       aspectRatio: "audio",
       layoutAspectRatio: "audio",
       previewAspectRatio: "audio",
@@ -396,11 +389,7 @@ function normalizeMediaItem(item = {}, context = {}) {
     metadata.has_audio === true ||
     item.is_audio === true;
 
-  const aspectRatio = getAspectRatio(
-    width,
-    height,
-    context.aspectRatio || "landscape"
-  );
+  const aspectRatio = getAspectRatio(width, height, context.aspectRatio || "landscape");
 
   return {
     type: "video",
@@ -414,9 +403,7 @@ function normalizeMediaItem(item = {}, context = {}) {
       formatSize(sizeBytes, true),
     sizeBytes,
     sizeEstimated: !sizeBytes,
-    formatId: String(
-      item.id || item.formatId || item.itag || metadata.itag || ""
-    ),
+    formatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
     width: width || null,
     height: height || null,
     fps: item.fps || metadata.fps || null,
@@ -633,11 +620,9 @@ function buildProviderParams(provider, originalUrl) {
   }
 
   if (provider.key === "YOUTUBE_SECOND") {
-    params.urlAccess =
-      process.env.RAPIDAPI_YOUTUBE_SECOND_URL_ACCESS || "normal";
+    params.urlAccess = process.env.RAPIDAPI_YOUTUBE_SECOND_URL_ACCESS || "normal";
     params.renderableFormats =
-      process.env.RAPIDAPI_YOUTUBE_SECOND_RENDERABLE_FORMATS ||
-      "720p,highres";
+      process.env.RAPIDAPI_YOUTUBE_SECOND_RENDERABLE_FORMATS || "720p,highres";
     params.getTranscript =
       process.env.RAPIDAPI_YOUTUBE_SECOND_GET_TRANSCRIPT || "false";
   }
@@ -645,13 +630,11 @@ function buildProviderParams(provider, originalUrl) {
   if (provider.key === "YOUTUBE_THIRD") {
     params.format = process.env.RAPIDAPI_YOUTUBE_THIRD_FORMAT || "mp4";
     params.add_info = process.env.RAPIDAPI_YOUTUBE_THIRD_ADD_INFO || "1";
-    params.audio_quality =
-      process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_QUALITY || "128";
+    params.audio_quality = process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_QUALITY || "128";
     params.allow_extended_duration =
       process.env.RAPIDAPI_YOUTUBE_THIRD_ALLOW_EXTENDED_DURATION || "false";
     params.no_merge = process.env.RAPIDAPI_YOUTUBE_THIRD_NO_MERGE || "false";
-    params.audio_language =
-      process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_LANGUAGE || "en";
+    params.audio_language = process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_LANGUAGE || "en";
   }
 
   return params;
