@@ -3,8 +3,12 @@ const axios = require("axios");
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || "";
 
 const DEFAULT_TIMEOUT = Number(process.env.RAPIDAPI_TIMEOUT || 45000);
-const DEFAULT_PROGRESS_TIMEOUT = Number(process.env.RAPIDAPI_PROGRESS_TIMEOUT || 65000);
-const DEFAULT_PROGRESS_INTERVAL = Number(process.env.RAPIDAPI_PROGRESS_INTERVAL || 1800);
+const DEFAULT_PROGRESS_TIMEOUT = Number(
+  process.env.RAPIDAPI_PROGRESS_TIMEOUT || 65000
+);
+const DEFAULT_PROGRESS_INTERVAL = Number(
+  process.env.RAPIDAPI_PROGRESS_INTERVAL || 1800
+);
 
 const PROVIDERS = {
   youtubeSecond: {
@@ -13,8 +17,9 @@ const PROVIDERS = {
     host: process.env.RAPIDAPI_YOUTUBE_SECOND_HOST,
     url: process.env.RAPIDAPI_YOUTUBE_SECOND_URL,
     method: process.env.RAPIDAPI_YOUTUBE_SECOND_METHOD || "GET",
-    urlParam: process.env.RAPIDAPI_YOUTUBE_SECOND_URL_PARAM || "url",
+    urlParam: process.env.RAPIDAPI_YOUTUBE_SECOND_URL_PARAM || "videoId",
   },
+
   youtubeThird: {
     layer: 3,
     key: "YOUTUBE_THIRD",
@@ -23,6 +28,7 @@ const PROVIDERS = {
     method: process.env.RAPIDAPI_YOUTUBE_THIRD_METHOD || "GET",
     urlParam: process.env.RAPIDAPI_YOUTUBE_THIRD_URL_PARAM || "url",
   },
+
   instagramSecond: {
     layer: 2,
     key: "INSTAGRAM_SECOND",
@@ -31,6 +37,7 @@ const PROVIDERS = {
     method: process.env.RAPIDAPI_INSTAGRAM_SECOND_METHOD || "GET",
     urlParam: process.env.RAPIDAPI_INSTAGRAM_SECOND_URL_PARAM || "url",
   },
+
   instagramThird: {
     layer: 3,
     key: "INSTAGRAM_THIRD",
@@ -39,6 +46,7 @@ const PROVIDERS = {
     method: process.env.RAPIDAPI_INSTAGRAM_THIRD_METHOD || "GET",
     urlParam: process.env.RAPIDAPI_INSTAGRAM_THIRD_URL_PARAM || "url",
   },
+
   allSocialLast: {
     layer: 4,
     key: "ALL_SOCIAL_LAST",
@@ -51,18 +59,56 @@ const PROVIDERS = {
 
 function detectPlatform(urlValue = "") {
   try {
-    const hostname = new URL(String(urlValue)).hostname.replace(/^www\./, "").toLowerCase();
+    const hostname = new URL(String(urlValue))
+      .hostname.replace(/^www\./, "")
+      .toLowerCase();
 
-    if (hostname.includes("youtube.com") || hostname.includes("youtu.be")) return "youtube";
+    if (hostname.includes("youtube.com") || hostname.includes("youtu.be")) {
+      return "youtube";
+    }
+
     if (hostname.includes("instagram.com")) return "instagram";
-    if (hostname.includes("facebook.com") || hostname.includes("fb.watch")) return "facebook";
+
+    if (hostname.includes("facebook.com") || hostname.includes("fb.watch")) {
+      return "facebook";
+    }
+
     if (hostname.includes("reddit.com")) return "reddit";
     if (hostname.includes("tiktok.com")) return "tiktok";
-    if (hostname.includes("x.com") || hostname.includes("twitter.com")) return "x";
+
+    if (hostname.includes("x.com") || hostname.includes("twitter.com")) {
+      return "x";
+    }
 
     return "generic";
   } catch {
     return "generic";
+  }
+}
+
+function getYouTubeVideoId(urlValue = "") {
+  try {
+    const url = new URL(String(urlValue));
+    const host = url.hostname.replace(/^www\./, "").toLowerCase();
+
+    if (host === "youtu.be") {
+      return url.pathname.split("/").filter(Boolean)[0] || "";
+    }
+
+    if (host.includes("youtube.com")) {
+      const videoId = url.searchParams.get("v");
+      if (videoId) return videoId;
+
+      const parts = url.pathname.split("/").filter(Boolean);
+
+      if (parts[0] === "shorts" && parts[1]) return parts[1];
+      if (parts[0] === "embed" && parts[1]) return parts[1];
+      if (parts[0] === "live" && parts[1]) return parts[1];
+    }
+
+    return "";
+  } catch {
+    return "";
   }
 }
 
@@ -71,7 +117,13 @@ function sleep(ms) {
 }
 
 function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "--";
+  if (
+    seconds === null ||
+    seconds === undefined ||
+    Number.isNaN(Number(seconds))
+  ) {
+    return "--";
+  }
 
   const totalSeconds = Math.floor(Number(seconds));
   const hours = Math.floor(totalSeconds / 3600);
@@ -79,7 +131,9 @@ function formatDuration(seconds) {
   const remainingSeconds = totalSeconds % 60;
 
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(
+      remainingSeconds
+    ).padStart(2, "0")}`;
   }
 
   return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
@@ -88,7 +142,9 @@ function formatDuration(seconds) {
 function formatSize(bytes, estimated = true) {
   const size = Number(bytes || 0);
 
-  if (!size || Number.isNaN(size) || size <= 0) return estimated ? "Approx. 1 MB" : "1 MB";
+  if (!size || Number.isNaN(size) || size <= 0) {
+    return estimated ? "Approx. 1 MB" : "1 MB";
+  }
 
   const mb = size / 1024 / 1024;
   const gb = mb / 1024;
@@ -106,7 +162,12 @@ function formatSize(bytes, estimated = true) {
 function parseResolution(value = "") {
   const match = String(value || "").match(/(\d{2,5})\s*[x×]\s*(\d{2,5})/i);
 
-  if (!match) return { width: null, height: null };
+  if (!match) {
+    return {
+      width: null,
+      height: null,
+    };
+  }
 
   return {
     width: Number(match[1]),
@@ -124,12 +185,24 @@ function getAspectRatio(width, height, fallback = "landscape") {
 
   if (ratio < 0.8) return "portrait";
   if (ratio > 1.2) return "landscape";
+
   return "square";
 }
 
 function getQualityRank(item = {}) {
   const metadata = item.metadata || {};
-  const height = Number(item.height || metadata.height || item.qualityHeight || 0);
+  const parsedResolution = parseResolution(
+    item.resolution || item.quality || item.label || metadata.quality_label || ""
+  );
+
+  const height = Number(
+    item.height ||
+      metadata.height ||
+      item.qualityHeight ||
+      parsedResolution.height ||
+      0
+  );
+
   if (height > 0) return height;
 
   const text = String(
@@ -169,13 +242,24 @@ function getQualityLabel(item = {}) {
   if (rank >= 240) return "240p";
   if (rank >= 144) return "144p";
 
-  return item.label || item.quality || item.resolution || metadata.quality_label || "Default";
+  return (
+    item.label ||
+    item.quality ||
+    item.resolution ||
+    metadata.quality_label ||
+    "Default"
+  );
 }
 
 function getExtension(item = {}) {
   const metadata = item.metadata || {};
-  const mime = String(item.mimeType || item.mime_type || metadata.mime_type || "").toLowerCase();
-  const explicit = String(item.extension || item.ext || "").replace(".", "").toLowerCase();
+  const mime = String(
+    item.mimeType || item.mime_type || metadata.mime_type || ""
+  ).toLowerCase();
+
+  const explicit = String(item.extension || item.ext || "")
+    .replace(".", "")
+    .toLowerCase();
 
   if (explicit) return explicit;
   if (mime.includes("webm")) return "webm";
@@ -211,20 +295,38 @@ function sortVideoFormats(items = []) {
 }
 
 function sortAudioFormats(items = []) {
-  return [...items].sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0));
+  return [...items].sort(
+    (a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0)
+  );
 }
 
 function normalizeMediaItem(item = {}, context = {}) {
   const metadata = item.metadata || {};
-  const url = item.url || item.link || item.download_url || item.downloadUrl || item.src || item.href || "";
+
+  const url =
+    item.url ||
+    item.link ||
+    item.download_url ||
+    item.downloadUrl ||
+    item.src ||
+    item.href ||
+    "";
 
   if (!url || typeof url !== "string") return null;
 
-  const parsedResolution = parseResolution(item.resolution || item.quality || item.label || "");
-  const width = item.width || metadata.width || parsedResolution.width || null;
-  const height = item.height || metadata.height || parsedResolution.height || null;
+  const parsedResolution = parseResolution(
+    item.resolution || item.quality || item.label || ""
+  );
+
+  const width =
+    item.width || metadata.width || parsedResolution.width || null;
+
+  const height =
+    item.height || metadata.height || parsedResolution.height || null;
+
   const ext = getExtension(item);
   const qualityRank = getQualityRank({ ...item, width, height });
+
   const sizeBytes = Number(
     item.size ||
       item.filesize ||
@@ -234,24 +336,41 @@ function normalizeMediaItem(item = {}, context = {}) {
       0
   );
 
-  const typeText = String(item.type || item.mediaType || item.kind || "").toLowerCase();
-  const mime = String(item.mimeType || item.mime_type || metadata.mime_type || "").toLowerCase();
+  const typeText = String(item.type || item.mediaType || item.kind || "")
+    .toLowerCase();
+
+  const mime = String(
+    item.mimeType || item.mime_type || metadata.mime_type || ""
+  ).toLowerCase();
+
   const isAudio =
     typeText === "audio" ||
     mime.startsWith("audio/") ||
     ["mp3", "m4a", "aac", "opus"].includes(ext) ||
-    metadata.has_audio === true && metadata.has_video === false;
+    (metadata.has_audio === true && metadata.has_video === false) ||
+    (item.is_audio === true && metadata.has_video === false);
 
   if (isAudio) {
     return {
       type: "audio",
       url,
-      quality: item.quality || item.label || item.bitrate || item.abr || metadata.bitrate || "Audio",
+      quality:
+        item.quality ||
+        item.label ||
+        item.bitrate ||
+        item.abr ||
+        metadata.bitrate ||
+        "Audio",
       ext: ext || "m4a",
-      size: item.content_length_text || metadata.content_length_text || formatSize(sizeBytes, true),
+      size:
+        item.content_length_text ||
+        metadata.content_length_text ||
+        formatSize(sizeBytes, true),
       sizeBytes,
       sizeEstimated: !sizeBytes,
-      formatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
+      formatId: String(
+        item.id || item.formatId || item.itag || metadata.itag || ""
+      ),
       width: null,
       height: null,
       fps: null,
@@ -259,8 +378,12 @@ function normalizeMediaItem(item = {}, context = {}) {
       acodec: item.codec || item.acodec || "audio",
       hasAudio: true,
       audioUrl: "",
-      audioFormatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
+      audioFormatId: String(
+        item.id || item.formatId || item.itag || metadata.itag || ""
+      ),
       aspectRatio: "audio",
+      layoutAspectRatio: "audio",
+      previewAspectRatio: "audio",
       qualityRank: 0,
       sourceLayer: context.layer,
       sourceProvider: context.provider,
@@ -271,7 +394,13 @@ function normalizeMediaItem(item = {}, context = {}) {
     item.hasAudio === true ||
     item.has_audio === true ||
     metadata.has_audio === true ||
-    (metadata.has_audio !== false && item.is_audio === true);
+    item.is_audio === true;
+
+  const aspectRatio = getAspectRatio(
+    width,
+    height,
+    context.aspectRatio || "landscape"
+  );
 
   return {
     type: "video",
@@ -279,10 +408,15 @@ function normalizeMediaItem(item = {}, context = {}) {
     quality: getQualityLabel({ ...item, width, height }),
     qualityRank,
     ext: ext || "mp4",
-    size: item.content_length_text || metadata.content_length_text || formatSize(sizeBytes, true),
+    size:
+      item.content_length_text ||
+      metadata.content_length_text ||
+      formatSize(sizeBytes, true),
     sizeBytes,
     sizeEstimated: !sizeBytes,
-    formatId: String(item.id || item.formatId || item.itag || metadata.itag || ""),
+    formatId: String(
+      item.id || item.formatId || item.itag || metadata.itag || ""
+    ),
     width: width || null,
     height: height || null,
     fps: item.fps || metadata.fps || null,
@@ -291,8 +425,9 @@ function normalizeMediaItem(item = {}, context = {}) {
     hasAudio,
     audioUrl: "",
     audioFormatId: "",
-    aspectRatio: getAspectRatio(width, height, context.aspectRatio || "landscape"),
-    qualityRank,
+    aspectRatio,
+    layoutAspectRatio: aspectRatio,
+    previewAspectRatio: aspectRatio,
     sourceLayer: context.layer,
     sourceProvider: context.provider,
   };
@@ -308,9 +443,23 @@ function collectArrays(...values) {
   return output;
 }
 
+function getLargestImageUrl(images = []) {
+  if (!Array.isArray(images)) return "";
+
+  const sorted = [...images]
+    .filter((item) => item?.url)
+    .sort((a, b) => {
+      const areaA = Number(a.width || 0) * Number(a.height || 0);
+      const areaB = Number(b.width || 0) * Number(b.height || 0);
+      return areaB - areaA;
+    });
+
+  return sorted[0]?.url || "";
+}
+
 function normalizeFallbackResponse(raw = {}, originalUrl = "", context = {}) {
-  const root = raw.data || raw.result || raw.contents?.[0] || raw.content || raw;
   const content = Array.isArray(raw.contents) ? raw.contents[0] || {} : {};
+  const root = raw.data || raw.result || content || raw.content || raw;
   const info = root.info || raw.info || content.info || {};
 
   const title =
@@ -329,6 +478,7 @@ function normalizeFallbackResponse(raw = {}, originalUrl = "", context = {}) {
     root.image ||
     info.image ||
     root.poster ||
+    getLargestImageUrl(root.images?.[0] || root.images || []) ||
     "";
 
   const duration =
@@ -403,6 +553,13 @@ function normalizeFallbackResponse(raw = {}, originalUrl = "", context = {}) {
     bestPreview?.aspectRatio ||
     getAspectRatio(root.width, root.height, "landscape");
 
+  const finalVideo = sortedVideo.map((item) => ({
+    ...item,
+    aspectRatio,
+    layoutAspectRatio: aspectRatio,
+    previewAspectRatio: aspectRatio,
+  }));
+
   return {
     status: "success",
     source: context.provider || "fallback",
@@ -410,9 +567,19 @@ function normalizeFallbackResponse(raw = {}, originalUrl = "", context = {}) {
     fallbackLayer: context.layer,
     fallbackProvider: context.provider,
     platform,
-    title: String(title || "Video").replace(/\s+/g, " ").trim().slice(0, 90) || "Video",
+    title:
+      String(title || "Video")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 90) || "Video",
     originalTitle: String(title || "Video"),
-    uploader: root.uploader || root.author || root.username || root.owner?.username || "",
+    uploader:
+      root.uploader ||
+      root.author ||
+      root.username ||
+      root.owner?.username ||
+      root.owner?.full_name ||
+      "",
     thumb,
     duration: duration || null,
     durationText: formatDuration(duration),
@@ -425,30 +592,76 @@ function normalizeFallbackResponse(raw = {}, originalUrl = "", context = {}) {
     previewUrl: bestPreview?.url || "",
     previewMode: `fallback-layer-${context.layer}`,
     previewHasAudio: Boolean(bestPreview?.hasAudio),
-    previewAudioUrl: bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl || "" : "",
+    previewAudioUrl:
+      bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl || "" : "",
 
     rawPreviewUrl: bestPreview?.url || "",
     rawPreviewHasAudio: Boolean(bestPreview?.hasAudio),
-    rawPreviewAudioUrl: bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl || "" : "",
+    rawPreviewAudioUrl:
+      bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl || "" : "",
 
-    video: sortedVideo,
+    video: finalVideo,
     audio: sortedAudio,
-    urls: [...sortedVideo, ...sortedAudio],
+    urls: [...finalVideo, ...sortedAudio],
   };
 }
 
 function assertProviderConfigured(provider) {
-  if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY is missing.");
+  if (!RAPIDAPI_KEY) {
+    throw new Error("RAPIDAPI_KEY is missing.");
+  }
+
   if (!provider?.host || !provider?.url) {
     throw new Error(`${provider?.key || "RapidAPI provider"} is not configured.`);
   }
+}
+
+function buildProviderParams(provider, originalUrl) {
+  const urlParam = provider.urlParam || "url";
+  const params = {};
+
+  if (urlParam === "videoId") {
+    const videoId = getYouTubeVideoId(originalUrl);
+
+    if (!videoId) {
+      throw new Error("Could not extract YouTube videoId from URL.");
+    }
+
+    params.videoId = videoId;
+  } else {
+    params[urlParam] = originalUrl;
+  }
+
+  if (provider.key === "YOUTUBE_SECOND") {
+    params.urlAccess =
+      process.env.RAPIDAPI_YOUTUBE_SECOND_URL_ACCESS || "normal";
+    params.renderableFormats =
+      process.env.RAPIDAPI_YOUTUBE_SECOND_RENDERABLE_FORMATS ||
+      "720p,highres";
+    params.getTranscript =
+      process.env.RAPIDAPI_YOUTUBE_SECOND_GET_TRANSCRIPT || "false";
+  }
+
+  if (provider.key === "YOUTUBE_THIRD") {
+    params.format = process.env.RAPIDAPI_YOUTUBE_THIRD_FORMAT || "mp4";
+    params.add_info = process.env.RAPIDAPI_YOUTUBE_THIRD_ADD_INFO || "1";
+    params.audio_quality =
+      process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_QUALITY || "128";
+    params.allow_extended_duration =
+      process.env.RAPIDAPI_YOUTUBE_THIRD_ALLOW_EXTENDED_DURATION || "false";
+    params.no_merge = process.env.RAPIDAPI_YOUTUBE_THIRD_NO_MERGE || "false";
+    params.audio_language =
+      process.env.RAPIDAPI_YOUTUBE_THIRD_AUDIO_LANGUAGE || "en";
+  }
+
+  return params;
 }
 
 async function callRapidApiProvider(provider, originalUrl) {
   assertProviderConfigured(provider);
 
   const method = String(provider.method || "GET").toUpperCase();
-  const urlParam = provider.urlParam || "url";
+  const payload = buildProviderParams(provider, originalUrl);
 
   const config = {
     method,
@@ -462,24 +675,19 @@ async function callRapidApiProvider(provider, originalUrl) {
   };
 
   if (method === "GET") {
-    config.params = {
-      [urlParam]: originalUrl,
-      url: originalUrl,
-      link: originalUrl,
-    };
+    config.params = payload;
   } else {
-    config.data = {
-      [urlParam]: originalUrl,
-      url: originalUrl,
-      link: originalUrl,
-    };
+    config.data = payload;
   }
 
   const response = await axios.request(config);
   let raw = response.data;
 
   const progressUrl =
-    raw?.progress_url || raw?.progressUrl || raw?.info?.progress_url || raw?.data?.progress_url;
+    raw?.progress_url ||
+    raw?.progressUrl ||
+    raw?.info?.progress_url ||
+    raw?.data?.progress_url;
 
   if (progressUrl && !hasPlayableMedia(raw)) {
     raw = await pollProgressUrl(progressUrl, provider);
@@ -489,8 +697,8 @@ async function callRapidApiProvider(provider, originalUrl) {
 }
 
 function hasPlayableMedia(raw = {}) {
-  const root = raw.data || raw.result || raw.contents?.[0] || raw.content || raw;
   const content = Array.isArray(raw.contents) ? raw.contents[0] || {} : {};
+  const root = raw.data || raw.result || content || raw.content || raw;
 
   const arrays = collectArrays(
     root.medias,
@@ -509,7 +717,15 @@ function hasPlayableMedia(raw = {}) {
     content.downloads
   );
 
-  return arrays.some((item) => item?.url || item?.link || item?.download_url || item?.downloadUrl || item?.src || item?.href);
+  return arrays.some(
+    (item) =>
+      item?.url ||
+      item?.link ||
+      item?.download_url ||
+      item?.downloadUrl ||
+      item?.src ||
+      item?.href
+  );
 }
 
 async function pollProgressUrl(progressUrl, provider) {
@@ -531,7 +747,10 @@ async function pollProgressUrl(progressUrl, provider) {
 
     if (hasPlayableMedia(lastPayload)) return lastPayload;
 
-    const status = String(lastPayload?.status || lastPayload?.state || lastPayload?.message || "").toLowerCase();
+    const status = String(
+      lastPayload?.status || lastPayload?.state || lastPayload?.message || ""
+    ).toLowerCase();
+
     if (status.includes("fail") || status.includes("error")) {
       throw new Error(lastPayload?.message || "RapidAPI progress failed.");
     }
@@ -572,6 +791,7 @@ async function fetchMediaFromFallbackLayers(originalUrl, options = {}) {
   for (const provider of providerOrder) {
     try {
       const raw = await callRapidApiProvider(provider, originalUrl);
+
       const normalized = normalizeFallbackResponse(raw, originalUrl, {
         layer: provider.layer,
         provider: provider.key,
@@ -579,7 +799,11 @@ async function fetchMediaFromFallbackLayers(originalUrl, options = {}) {
         reason: options.reason || "EXTRACTION_FALLBACK",
       });
 
-      if (normalized.video.length || normalized.audio.length || normalized.previewUrl) {
+      if (
+        normalized.video.length ||
+        normalized.audio.length ||
+        normalized.previewUrl
+      ) {
         return {
           ...normalized,
           fallbackReason: options.reason || "EXTRACTION_FALLBACK",
@@ -593,7 +817,11 @@ async function fetchMediaFromFallbackLayers(originalUrl, options = {}) {
         layer: provider.layer,
         message: error.message,
       });
-      console.log(`Fallback layer ${provider.layer} failed (${provider.key}):`, error.message);
+
+      console.log(
+        `Fallback layer ${provider.layer} failed (${provider.key}):`,
+        error.message
+      );
     }
   }
 
@@ -606,4 +834,5 @@ module.exports = {
   detectPlatform,
   fetchMediaFromFallbackLayers,
   normalizeFallbackResponse,
+  getYouTubeVideoId,
 };
