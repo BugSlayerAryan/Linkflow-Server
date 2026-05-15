@@ -4869,6 +4869,10 @@ exports.downloadDirectMedia = async (req, res) => {
       videoFormatId,
       audioFormatId,
       hasAudio,
+      fallbackUsed,
+      sourceLayer,
+      sourceProvider,
+      preferDirectDownload,
     } = req.body;
 
     const safeTitle = sanitizeFileName(title || "linkflow-download");
@@ -4884,7 +4888,20 @@ exports.downloadDirectMedia = async (req, res) => {
 
     const originalUrlValue = String(originalUrl || "");
 
-    if (originalUrlValue) {
+    /**
+     * IMPORTANT:
+     * If the media came from RapidAPI fallback, selectedMedia.url is already a
+     * direct playable/downloadable CDN URL. In that case we must NOT run yt-dlp
+     * against originalUrl again, because that is exactly what caused 429/403
+     * during download even though preview was playable.
+     */
+    const shouldUseDirectDownload = Boolean(
+      preferDirectDownload || fallbackUsed || sourceLayer || sourceProvider
+    );
+
+    const shouldUseYtDlpDownload = Boolean(originalUrlValue && !shouldUseDirectDownload);
+
+    if (shouldUseYtDlpDownload) {
       const sourcePrefix = `${safeTitle}-${timestamp}-source`;
       const outputTemplate = path.join(outputDir, `${sourcePrefix}.%(ext)s`);
 
