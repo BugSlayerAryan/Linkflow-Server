@@ -37,6 +37,8 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
+  "https://snapdl.tech",
+  "https://www.snapdl.tech",
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
