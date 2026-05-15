@@ -3417,6 +3417,7 @@
 
 
 
+
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -3431,7 +3432,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-const PREVIEW_MODE = "raw-preview-download-audio-v24";
+const PREVIEW_MODE = "raw-preview-download-audio-v25";
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -4073,6 +4074,33 @@ const getAspectRatio = (width, height, ytAspectRatio, rotation = 0) => {
   return "landscape";
 };
 
+const getThumbnailAspectRatio = (data = {}) => {
+  const thumbnails = [];
+
+  if (data.thumbnail_width || data.thumbnail_height) {
+    thumbnails.push({ width: data.thumbnail_width, height: data.thumbnail_height });
+  }
+
+  if (Array.isArray(data.thumbnails)) {
+    thumbnails.push(...data.thumbnails);
+  }
+
+  const validThumbnails = thumbnails
+    .map((item) => ({
+      width: Number(item.width || 0),
+      height: Number(item.height || 0),
+    }))
+    .filter((item) => item.width > 0 && item.height > 0)
+    .sort((a, b) => b.width * b.height - a.width * a.height);
+
+  for (const item of validThumbnails) {
+    const detected = getAspectRatio(item.width, item.height);
+    if (detected) return detected;
+  }
+
+  return null;
+};
+
 const getQualityLabel = (item = {}) => {
   const height = getFormatHeight(item);
 
@@ -4504,7 +4532,20 @@ exports.postMedia = async (req, res, next) => {
             aspectRatio: getAspectRatio(
               normalized.width,
               normalized.height,
-              item.aspect_ratio
+              item.aspect_ratio,
+              normalized.rotation
+            ),
+            layoutAspectRatio: getAspectRatio(
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio,
+              normalized.rotation
+            ),
+            previewAspectRatio: getAspectRatio(
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio,
+              normalized.rotation
             ),
             rotation: normalized.rotation,
           };
@@ -4554,7 +4595,20 @@ exports.postMedia = async (req, res, next) => {
             aspectRatio: getAspectRatio(
               normalized.width,
               normalized.height,
-              item.aspect_ratio
+              item.aspect_ratio,
+              normalized.rotation
+            ),
+            layoutAspectRatio: getAspectRatio(
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio,
+              normalized.rotation
+            ),
+            previewAspectRatio: getAspectRatio(
+              normalized.width,
+              normalized.height,
+              item.aspect_ratio,
+              normalized.rotation
             ),
             rotation: normalized.rotation,
           };
@@ -4604,6 +4658,7 @@ exports.postMedia = async (req, res, next) => {
         .slice(0, 10);
 
       const sourceNormalized = getNormalizedDimensions(data);
+      const thumbnailAspectRatio = getThumbnailAspectRatio(data);
       const sourceAspectRatio = getAspectRatio(
         sourceNormalized.width,
         sourceNormalized.height,
@@ -4619,9 +4674,17 @@ exports.postMedia = async (req, res, next) => {
         null;
 
       const finalAspectRatio =
-        sourceAspectRatio && sourceAspectRatio !== "landscape"
+        thumbnailAspectRatio ||
+        (sourceAspectRatio && sourceAspectRatio !== "landscape"
           ? sourceAspectRatio
-          : bestPreview?.aspectRatio || "landscape";
+          : bestPreview?.aspectRatio || "landscape");
+
+      const finalVideoFormats = videoFormats.map((item) => ({
+        ...item,
+        aspectRatio: finalAspectRatio,
+        layoutAspectRatio: finalAspectRatio,
+        previewAspectRatio: finalAspectRatio,
+      }));
 
       const originalPageUrl = data.webpage_url || url;
 
@@ -4640,6 +4703,8 @@ exports.postMedia = async (req, res, next) => {
         viewCount: data.view_count || null,
         webpage_url: originalPageUrl,
         aspectRatio: finalAspectRatio,
+        layoutAspectRatio: finalAspectRatio,
+        previewAspectRatio: finalAspectRatio,
 
         previewUrl: bestPreview?.url || "",
         previewMode: PREVIEW_MODE,
@@ -4652,9 +4717,9 @@ exports.postMedia = async (req, res, next) => {
         rawPreviewAudioUrl:
           bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl : "",
 
-        video: videoFormats,
+        video: finalVideoFormats,
         audio: audioFormats,
-        urls: [...videoFormats, ...audioFormats],
+        urls: [...finalVideoFormats, ...audioFormats],
       });
 
       if (req.users) {
