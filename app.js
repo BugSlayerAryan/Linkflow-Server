@@ -16,23 +16,11 @@ const publicRoutes = require("./routes/public");
 
 /**
  * Important for Render / proxy hosting.
- * This helps request-ip and Express understand the real client IP
- * behind Render's proxy.
  */
 app.set("trust proxy", true);
 
 /**
- * Body limits.
- * Your requests are small, but 10mb is safe for metadata/download payloads.
- */
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-/**
- * CORS
- *
- * For first deployment, this works with all origins.
- * Later, you can restrict it to your Vercel domain.
+ * CORS must be before routes and before JSON routes that receive preflight.
  */
 const allowedOrigins = [
   "http://localhost:5173",
@@ -42,35 +30,41 @@ const allowedOrigins = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      /**
-       * Allow requests with no origin:
-       * - direct browser URL open
-       * - curl/Postman
-       * - video tag preview requests
-       */
-      if (!origin) {
-        return callback(null, true);
-      }
+const corsOptions = {
+  origin(origin, callback) {
+    /**
+     * Allow requests with no origin:
+     * - direct browser URL open
+     * - curl/Postman
+     * - video/img tag requests
+     */
+    if (!origin) return callback(null, true);
 
-      /**
-       * During development/deploy testing, allow all if FRONTEND_URL is not set.
-       */
-      if (!process.env.FRONTEND_URL) {
-        return callback(null, true);
-      }
+    /**
+     * During development/deploy testing, allow all if FRONTEND_URL is not set.
+     * Set FRONTEND_URL in production to restrict origins.
+     */
+    if (!process.env.FRONTEND_URL) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+    if (allowedOrigins.includes(origin)) return callback(null, true);
 
-      return callback(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  })
-);
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Range"],
+  exposedHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+/**
+ * Body limits.
+ */
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 app.use(requestIp.mw());
 
@@ -86,7 +80,6 @@ app.get("/", (req, res) => {
 
 /**
  * Optional robots.txt for backend API.
- * Prevent search engines from crawling API routes.
  */
 app.get("/robots.txt", (req, res) => {
   res.type("text/plain");
@@ -101,9 +94,7 @@ Disallow: /
  */
 app.use(async (req, res, next) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      return next();
-    }
+    if (mongoose.connection.readyState !== 1) return next();
 
     const ip = req.clientIp || req.ip || "unknown";
     let user = await User.findOne({ ip });
@@ -146,9 +137,7 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.log("Global error:", err.message);
 
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) return next(err);
 
   res.status(500).json({
     status: "fail",
@@ -176,10 +165,6 @@ const startServer = async () => {
   } catch (err) {
     console.log("MongoDB connection error:", err.message);
 
-    /**
-     * Start server even if Mongo fails.
-     * This prevents Render from marking the app as crashed only because DB is unavailable.
-     */
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server Running On ${PORT} without MongoDB`);
     });

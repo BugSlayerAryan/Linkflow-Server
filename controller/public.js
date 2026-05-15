@@ -3418,9 +3418,11 @@
 
 
 
+
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const { fetchMediaFromFallbackLayers } = require("../services/socialFallbackLayers.service");
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE_PATH = process.env.FFPROBE_PATH || "ffprobe";
@@ -3433,6 +3435,16 @@ if (!fs.existsSync(outputDir)) {
 }
 
 const PREVIEW_MODE = "raw-preview-download-audio-v25";
+
+const tryFallbackLayers = async (url, reason = "YTDLP_FAILED") => {
+  const fallbackData = await fetchMediaFromFallbackLayers(url, { reason });
+
+  return {
+    ...fallbackData,
+    fallbackUsed: true,
+    fallbackReason: reason,
+  };
+};
 
 exports.startApi = (req, res) => {
   res.status(200).json({
@@ -4383,26 +4395,44 @@ exports.postMedia = async (req, res, next) => {
       }
 
       if (code !== 0 && !data) {
-        isResponded = true;
+        try {
+          const fallbackData = await tryFallbackLayers(url, "YTDLP_FAILED");
 
-        const friendlyError = normalizeErrorMessage(stderr);
+          isResponded = true;
+          return res.status(200).json(fallbackData);
+        } catch (fallbackError) {
+          isResponded = true;
 
-        return res.status(friendlyError.statusCode).json({
-          status: "fail",
-          code: friendlyError.code,
-          error: friendlyError.error,
-          details: stderr || "Unknown yt-dlp error",
-        });
+          const friendlyError = normalizeErrorMessage(stderr);
+
+          return res.status(friendlyError.statusCode).json({
+            status: "fail",
+            code: friendlyError.code,
+            error: friendlyError.error,
+            details: stderr || "Unknown yt-dlp error",
+            fallbackError: fallbackError.message,
+            fallbackDetails: fallbackError.details || [],
+          });
+        }
       }
 
       if (!data) {
-        isResponded = true;
+        try {
+          const fallbackData = await tryFallbackLayers(url, "INVALID_YTDLP_RESPONSE");
 
-        return res.status(500).json({
-          status: "fail",
-          code: "INVALID_YTDLP_RESPONSE",
-          error: "Invalid yt-dlp response. Please try another video link.",
-        });
+          isResponded = true;
+          return res.status(200).json(fallbackData);
+        } catch (fallbackError) {
+          isResponded = true;
+
+          return res.status(500).json({
+            status: "fail",
+            code: "INVALID_YTDLP_RESPONSE",
+            error: "Invalid yt-dlp response. Please try another video link.",
+            fallbackError: fallbackError.message,
+            fallbackDetails: fallbackError.details || [],
+          });
+        }
       }
 
       const allFormats = Array.isArray(data.formats) ? data.formats : [];
@@ -4740,6 +4770,38 @@ exports.postMedia = async (req, res, next) => {
     }
 
     next(err);
+  }
+};
+
+exports.fallbackMedia = async (req, res) => {
+  try {
+    const url = req.body.urls || req.body.url;
+
+    if (
+      !url ||
+      typeof url !== "string" ||
+      (!url.startsWith("http://") && !url.startsWith("https://"))
+    ) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_URL",
+        error: "Valid URL is required",
+      });
+    }
+
+    const data = await tryFallbackLayers(url, "DIRECT_FALLBACK_TEST");
+
+    return res.status(200).json(data);
+  } catch (err) {
+    console.log("Fallback media error:", err.message);
+
+    return res.status(500).json({
+      status: "fail",
+      code: "FALLBACK_MEDIA_FAILED",
+      error: "Fallback extraction failed.",
+      details: err.message,
+      fallbackDetails: err.details || [],
+    });
   }
 };
 
