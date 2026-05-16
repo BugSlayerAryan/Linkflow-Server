@@ -1,8 +1,3 @@
-
-
-
-
-
 // const { spawn } = require("child_process");
 // const path = require("path");
 // const fs = require("fs");
@@ -1144,32 +1139,97 @@
 //   return [];
 // };
 
+// const getUrlSearchParam = (url = "", key = "") => {
+//   try {
+//     const parsed = new URL(url);
+//     return parsed.searchParams.get(key) || "";
+//   } catch {
+//     return "";
+//   }
+// };
+
+// const getRapidApiItemText = (item = {}) => {
+//   return [
+//     item.quality,
+//     item.title,
+//     item.name,
+//     item.label,
+//     item.format,
+//     item.format_note,
+//     item.resolution,
+//     item.mime,
+//     item.mime_type,
+//     item.type,
+//   ]
+//     .filter(Boolean)
+//     .join(" ")
+//     .toLowerCase();
+// };
+
+// const isYouTubeProgressiveItag = (url = "") => {
+//   const itag = getUrlSearchParam(url, "itag");
+
+//   /**
+//    * Common YouTube progressive/muxed formats.
+//    * These contain video + audio in the same file.
+//    *
+//    * 18 = 360p MP4 with audio
+//    * 22 = 720p MP4 with audio
+//    * 43/44/45/46 = old WebM progressive formats
+//    * 59/78 = mobile/progressive MP4 variants
+//    */
+//   return ["18", "22", "43", "44", "45", "46", "59", "78"].includes(itag);
+// };
 
 // const isRapidApiVideoOnlyItem = (item = {}) => {
-//   const url = String(item.url || "");
-//   const quality = String(item.quality || item.resolution || item.format || "").toLowerCase();
-//   const type = String(item.type || "").toLowerCase();
-//   const acodec = String(item.acodec || item.audioCodec || item.audio_codec || "").toLowerCase();
+//   const text = getRapidApiItemText(item);
+//   const url = item.url || "";
+//   const acodec = String(item.acodec || item.audioCodec || "").toLowerCase();
 //   const hasAudioValue = item.hasAudio ?? item.has_audio ?? item.audio;
 
-//   if (hasAudioValue === true || hasAudioValue === "true") return false;
+//   if (isYouTubeProgressiveItag(url)) {
+//     return false;
+//   }
+
 //   if (hasAudioValue === false || hasAudioValue === "false") return true;
+//   if (acodec === "none") return true;
 
-//   if (isGoogleVideoUrl(url)) return true;
+//   if (
+//     text.includes("video only") ||
+//     text.includes("video_only") ||
+//     text.includes("no audio") ||
+//     text.includes("without audio")
+//   ) {
+//     return true;
+//   }
 
-//   return (
-//     type.includes("video_only") ||
-//     type.includes("video-only") ||
-//     quality.includes("video only") ||
-//     quality.includes("video_only") ||
-//     quality.includes("no audio") ||
-//     acodec === "none"
-//   );
+//   /**
+//    * YouTube DASH googlevideo streams are usually separated.
+//    * But progressive itags like 18/22 are handled above as complete files.
+//    */
+//   if (isGoogleVideoUrl(url)) {
+//     return true;
+//   }
+
+//   return false;
 // };
 
 // const rapidApiVideoHasEmbeddedAudio = (item = {}) => {
-//   if (!item?.url) return false;
-//   return !isRapidApiVideoOnlyItem(item);
+//   const url = item.url || "";
+//   const hasAudioValue = item.hasAudio ?? item.has_audio ?? item.audio;
+//   const acodec = String(item.acodec || item.audioCodec || "").toLowerCase();
+
+//   if (isYouTubeProgressiveItag(url)) return true;
+//   if (hasAudioValue === true || hasAudioValue === "true") return true;
+//   if (acodec && acodec !== "none" && acodec !== "unknown") return true;
+
+//   if (isRapidApiVideoOnlyItem(item)) return false;
+
+//   /**
+//    * For non-YouTube/unknown CDN MP4 files RapidAPI often returns a complete
+//    * progressive video, even when it also returns a separate audio entry.
+//    */
+//   return true;
 // };
 
 // const buildRapidApiPayload = (data = {}, req, originalUrl) => {
@@ -1238,7 +1298,7 @@
 
 //       const sizeInfo = getFormatSizeInfo(normalized, durationSeconds, "video");
 //       const hasEmbeddedAudio = rapidApiVideoHasEmbeddedAudio(item);
-//       const hasSeparateAudio = !hasEmbeddedAudio && Boolean(bestAudio?.url);
+//       const shouldAttachSeparateAudio = !hasEmbeddedAudio && Boolean(bestAudio?.url);
 
 //       return {
 //         type: "video",
@@ -1260,8 +1320,8 @@
 //         vcodec: "unknown",
 //         acodec: hasEmbeddedAudio ? "unknown" : "none",
 //         hasAudio: hasEmbeddedAudio,
-//         audioUrl: hasSeparateAudio ? bestAudio.url : "",
-//         audioFormatId: hasSeparateAudio ? bestAudio.formatId : "",
+//         audioUrl: shouldAttachSeparateAudio ? bestAudio.url : "",
+//         audioFormatId: shouldAttachSeparateAudio ? bestAudio.formatId : "",
 //         aspectRatio: getAspectRatio(
 //           item.width,
 //           item.height,
@@ -2443,20 +2503,6 @@
 //       `${safeTitle}-${timestamp}-${getUrlHash(originalUrl)}-fallback.${extension}`
 //     );
 
-//     if (type === "video" && bestVideoHasEmbeddedAudio) {
-//       hasFinished = true;
-//       console.log("[FALLBACK DOWNLOAD] RapidAPI video already has audio, streaming directly.");
-//       return streamRemoteMediaToResponse({
-//         req,
-//         res,
-//         url: bestVideo.url,
-//         title: safeTitle,
-//         type: "video",
-//         ext: bestVideo.extension || bestVideo.ext || "mp4",
-//         engine: "rapidapi-progressive-video",
-//       });
-//     }
-
 //     const args = ["-hide_banner", "-loglevel", "error", "-nostdin"];
 
 //     if (type === "audio") {
@@ -2472,7 +2518,7 @@
 //         "192k",
 //         outputPath
 //       );
-//     } else if (bestAudio?.url) {
+//     } else if (bestAudio?.url && !bestVideoHasEmbeddedAudio) {
 //       args.push(
 //         "-y",
 //         ...getMediaHeadersForFfmpeg(bestVideo.url),
@@ -2515,7 +2561,7 @@
 //       JSON.stringify({
 //         type,
 //         hasVideo: Boolean(bestVideo?.url),
-//         hasAudio: bestVideoHasEmbeddedAudio || Boolean(bestAudio?.url),
+//         hasSeparateAudio: Boolean(bestAudio?.url),
 //         videoHasEmbeddedAudio: bestVideoHasEmbeddedAudio,
 //         videoQuality: bestVideo?.quality || null,
 //         audioQuality: bestAudio?.quality || null,
@@ -2873,6 +2919,10 @@
 
 
 
+
+
+
+
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -2917,6 +2967,23 @@ const isValidHttpUrl = (value = "") => {
     return parsed.protocol === "http:" || parsed.protocol === "https:";
   } catch {
     return false;
+  }
+};
+
+const isBlockedProxyHost = (value = "") => {
+  try {
+    const parsed = new URL(String(value));
+    const hostname = parsed.hostname.toLowerCase();
+
+    return (
+      ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(hostname) ||
+      hostname.endsWith(".local") ||
+      hostname.startsWith("10.") ||
+      hostname.startsWith("192.168.") ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
+    );
+  } catch {
+    return true;
   }
 };
 
@@ -2987,6 +3054,12 @@ const getMediaFetchHeaders = (url = "") => {
     headers.Referer = "https://www.instagram.com/";
   } else if (String(url || "").toLowerCase().includes("fbcdn")) {
     headers.Referer = "https://www.facebook.com/";
+  } else if (
+    String(url || "").toLowerCase().includes("video.twimg.com") ||
+    String(url || "").toLowerCase().includes("twimg.com")
+  ) {
+    headers.Referer = "https://x.com/";
+    headers.Origin = "https://x.com";
   }
 
   return headers;
@@ -5657,6 +5730,108 @@ exports.openFallbackMedia = async (req, res) => {
       error: "Could not get fallback media URL.",
       details: err.message,
     });
+  }
+};
+
+
+exports.proxyMedia = async (req, res) => {
+  let timeout = null;
+
+  try {
+    const mediaUrl = req.query.url;
+
+    if (!isValidHttpUrl(mediaUrl)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_MEDIA_URL",
+        error: "Valid media URL is required",
+      });
+    }
+
+    if (isBlockedProxyHost(mediaUrl)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "BLOCKED_MEDIA_HOST",
+        error: "This media host is not allowed",
+      });
+    }
+
+    const abortController = new AbortController();
+
+    timeout = setTimeout(() => {
+      abortController.abort();
+    }, 30000);
+
+    const headers = {
+      ...getMediaFetchHeaders(mediaUrl),
+    };
+
+    if (req.headers.range) {
+      headers.Range = req.headers.range;
+    }
+
+    const response = await fetch(mediaUrl, {
+      signal: abortController.signal,
+      redirect: "follow",
+      headers,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok && response.status !== 206) {
+      return res.status(response.status === 403 ? 403 : 502).json({
+        status: "fail",
+        code: "MEDIA_PROXY_FETCH_FAILED",
+        error:
+          response.status === 403
+            ? "The media URL was blocked or expired."
+            : "Failed to fetch media.",
+        details: `Remote server returned ${response.status}`,
+      });
+    }
+
+    const contentType =
+      response.headers.get("content-type") ||
+      getContentTypeFromExt(getExtensionFromUrlOrType(mediaUrl, "video"), "video");
+
+    const contentLength = response.headers.get("content-length");
+    const contentRange = response.headers.get("content-range");
+    const acceptRanges = response.headers.get("accept-ranges") || "bytes";
+
+    res.status(response.status === 206 ? 206 : 200);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Accept-Ranges", acceptRanges);
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+
+    if (contentRange) {
+      res.setHeader("Content-Range", contentRange);
+    }
+
+    if (!response.body) {
+      const arrayBuffer = await response.arrayBuffer();
+      return res.send(Buffer.from(arrayBuffer));
+    }
+
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch (err) {
+    if (timeout) clearTimeout(timeout);
+
+    console.log("[MEDIA PROXY] error:", err.message);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        status: "fail",
+        code: "MEDIA_PROXY_FAILED",
+        error: "Media preview proxy failed.",
+        details: err.message,
+      });
+    }
   }
 };
 
