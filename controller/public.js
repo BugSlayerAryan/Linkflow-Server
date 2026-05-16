@@ -522,6 +522,55 @@ const getDimensionsFromQuality = (quality = "") => {
   return { width, height };
 };
 
+const getResolutionValueFromItem = (item = {}) => {
+  const qualityText = String(
+    item.quality || item.format_note || item.resolution || ""
+  );
+
+  const dimensions = getDimensionsFromQuality(qualityText);
+
+  const width = Number(item.width || dimensions.width || 0);
+  const height = Number(item.height || dimensions.height || 0);
+
+  if (width > 0 && height > 0) {
+    /**
+     * 1920x1080 and 1080x1920 should both display as 1080p.
+     */
+    return Math.min(width, height);
+  }
+
+  const numericMatch = qualityText.match(/(4320|2160|1440|1080|720|480|360|240)/);
+
+  if (numericMatch) {
+    return Number(numericMatch[1]);
+  }
+
+  const normalized = qualityText.toLowerCase();
+
+  if (normalized.includes("4k") || normalized.includes("uhd")) return 2160;
+  if (normalized.includes("2k") || normalized.includes("qhd")) return 1440;
+  if (normalized.includes("full hd") || normalized.includes("fhd")) return 1080;
+  if (normalized.includes("hd")) return 720;
+  if (normalized.includes("sd")) return 480;
+
+  return 0;
+};
+
+const getResolutionQualityLabel = (resolution = 0) => {
+  const value = Number(resolution || 0);
+
+  if (value >= 4320) return "4320p (8K)";
+  if (value >= 2160) return "2160p (4K)";
+  if (value >= 1440) return "1440p (2K)";
+  if (value >= 1080) return "1080p (Full HD)";
+  if (value >= 720) return "720p (HD)";
+  if (value >= 480) return "480p (SD)";
+  if (value >= 360) return "360p";
+  if (value >= 240) return "240p";
+
+  return "";
+};
+
 const getAspectRatioFromQuality = (quality = "") => {
   const { width, height } = getDimensionsFromQuality(quality);
 
@@ -555,40 +604,29 @@ const getAspectRatio = (width, height, ytAspectRatio, quality = "") => {
   return "landscape";
 };
 
-const getQualityLabel = (item) => {
-  const height = Number(item.height || 0);
+const getQualityLabel = (item = {}) => {
+  const resolutionLabel = getResolutionQualityLabel(getResolutionValueFromItem(item));
 
-  if (item.quality && !String(item.quality).includes("_")) {
-    return String(item.quality);
+  if (resolutionLabel) {
+    return resolutionLabel;
   }
 
-  if (height >= 4320) return "4320p (8K)";
-  if (height >= 2160) return "2160p (4K)";
-  if (height >= 1440) return "1440p (2K)";
-  if (height >= 1080) return "1080p (Full HD)";
-  if (height >= 720) return "720p (HD)";
-  if (height >= 480) return "480p (SD)";
-  if (height >= 360) return "360p";
-  if (height >= 240) return "240p";
+  const quality = String(item.quality || item.format_note || item.resolution || "").trim();
+  const normalized = quality.toLowerCase();
+
+  if (normalized.includes("audio")) return "Audio";
+  if (normalized.includes("hd")) return "720p (HD)";
+  if (normalized.includes("sd")) return "480p (SD)";
 
   if (item.width && item.height) {
     return `${item.width}×${item.height}`;
   }
 
-  return item.format_note || item.resolution || item.format_id || item.quality || "Default";
+  return quality || item.format_id || "Default";
 };
 
 const getSortHeight = (quality = "") => {
-  if (quality.includes("4320")) return 4320;
-  if (quality.includes("2160")) return 2160;
-  if (quality.includes("1440")) return 1440;
-  if (quality.includes("1080")) return 1080;
-  if (quality.includes("720")) return 720;
-  if (quality.includes("480")) return 480;
-  if (quality.includes("360")) return 360;
-  if (quality.includes("240")) return 240;
-
-  return Number(String(quality).match(/\d+/)?.[0]) || 0;
+  return getResolutionValueFromItem({ quality });
 };
 
 const normalizeErrorMessage = (stderr = "") => {
@@ -1122,7 +1160,12 @@ const buildRapidApiPayload = (data = {}, req, originalUrl) => {
       return {
         type: "video",
         url: item.url,
-        quality: item.quality || getQualityLabel(item),
+        quality: getQualityLabel({
+          ...item,
+          quality: item.quality || item.resolution || "",
+          width: item.width || getDimensionsFromQuality(item.quality || item.resolution || "").width,
+          height: item.height || getDimensionsFromQuality(item.quality || item.resolution || "").height,
+        }),
         ext: String(item.extension || item.ext || "mp4").toLowerCase(),
         size: sizeInfo.size,
         sizeBytes: sizeInfo.sizeBytes,
