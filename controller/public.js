@@ -2880,9 +2880,6 @@
 //   }
 // };
 
-
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -2907,6 +2904,15 @@ exports.startApi = (req, res) => {
     status: "success",
     message: "Welcome To Vidown Api",
   });
+};
+
+const isValidHttpUrl = (value = "") => {
+  try {
+    const parsed = new URL(String(value));
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
 };
 
 const sanitizeFileName = (value = "linkflow-download") => {
@@ -2949,7 +2955,6 @@ const getContentType = (filePath) => {
 
 const safeDeleteFile = (filePath) => {
   if (!filePath) return;
-
   fs.unlink(filePath, () => {});
 };
 
@@ -2958,21 +2963,16 @@ const isClientDisconnected = (res) => {
 };
 
 const sendJsonIfConnected = (res, statusCode, payload) => {
-  if (res.destroyed || res.writableEnded || res.headersSent) {
-    return;
-  }
-
+  if (res.destroyed || res.writableEnded || res.headersSent) return;
   return res.status(statusCode).json(payload);
 };
 
-const isValidHttpUrl = (value = "") => {
-  try {
-    const parsedUrl = new URL(value);
-
-    return parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:";
-  } catch {
-    return false;
-  }
+const getUrlHash = (value = "") => {
+  return crypto
+    .createHash("sha256")
+    .update(String(value))
+    .digest("hex")
+    .slice(0, 32);
 };
 
 const getCleanProcessError = (stderr = "") => {
@@ -2989,7 +2989,9 @@ const getCleanProcessError = (stderr = "") => {
     lines
       .reverse()
       .find((line) =>
-        /error|failed|invalid|unable|not found|permission|denied/i.test(line)
+        /error|failed|invalid|unable|not found|permission|denied|login|cookies|private|forbidden|unauthorized/i.test(
+          line
+        )
       ) || lines[0];
 
   return importantLine || "Download process failed.";
@@ -3033,34 +3035,6 @@ const sendPreparedFile = (res, filePath, downloadName) => {
     }
   });
 };
-
-const getUrlHash = (value = "") => {
-  return crypto
-    .createHash("sha256")
-    .update(String(value))
-    .digest("hex")
-    .slice(0, 32);
-};
-
-const cleanupOldPreviews = () => {
-  const maxAgeMs = 60 * 60 * 1000;
-  const now = Date.now();
-
-  try {
-    const files = fs.readdirSync(previewDir);
-
-    for (const file of files) {
-      const filePath = path.join(previewDir, file);
-      const stat = fs.statSync(filePath);
-
-      if (now - stat.mtimeMs > maxAgeMs) {
-        safeDeleteFile(filePath);
-      }
-    }
-  } catch {}
-};
-
-setInterval(cleanupOldPreviews, 30 * 60 * 1000);
 
 const isMetricOnlyTitle = (value = "") => {
   const text = String(value).trim().toLowerCase();
@@ -3429,8 +3403,92 @@ const normalizeErrorMessage = (stderr = "") => {
 
 const getPublicPreviewUrl = (req, originalUrl) => {
   const baseUrl = `${req.protocol}://${req.get("host")}`;
-
   return `${baseUrl}/api/v1/preview?url=${encodeURIComponent(originalUrl)}`;
+};
+
+const normalizeFormats = (data = {}, originalUrl = "") => {
+  let allFormats = Array.isArray(data.formats) ? data.formats : [];
+
+  if (!allFormats.length && data.url) {
+    allFormats = [
+      {
+        url: data.url,
+        ext: data.ext || "mp4",
+        format_id: data.format_id || "fallback-direct",
+        format_note: data.format_note || data.resolution || "Default",
+        width: data.width || null,
+        height: data.height || null,
+        fps: data.fps || null,
+        vcodec: data.vcodec || "unknown",
+        acodec: data.acodec || "unknown",
+        filesize: data.filesize || data.filesize_approx || null,
+        filesize_approx: data.filesize_approx || null,
+        tbr: data.tbr || null,
+        abr: data.abr || null,
+        duration: data.duration || null,
+      },
+    ];
+  }
+
+  if (
+    !allFormats.length &&
+    Array.isArray(data.requested_downloads) &&
+    data.requested_downloads.length
+  ) {
+    allFormats = data.requested_downloads
+      .filter((item) => item.url)
+      .map((item) => ({
+        url: item.url,
+        ext: item.ext || data.ext || "mp4",
+        format_id: item.format_id || data.format_id || "fallback-requested",
+        format_note:
+          item.format_note || item.resolution || data.resolution || "Default",
+        width: item.width || data.width || null,
+        height: item.height || data.height || null,
+        fps: item.fps || data.fps || null,
+        vcodec: item.vcodec || data.vcodec || "unknown",
+        acodec: item.acodec || data.acodec || "unknown",
+        filesize:
+          item.filesize ||
+          item.filesize_approx ||
+          data.filesize ||
+          data.filesize_approx ||
+          null,
+        filesize_approx: item.filesize_approx || data.filesize_approx || null,
+        tbr: item.tbr || data.tbr || null,
+        abr: item.abr || data.abr || null,
+        duration: item.duration || data.duration || null,
+      }));
+  }
+
+  /**
+   * Last fallback:
+   * Makes frontend show a downloadable option even if yt-dlp returns metadata only.
+   * Download endpoint will use originalUrl with yt-dlp.
+   */
+  if (!allFormats.length && isValidHttpUrl(originalUrl)) {
+    allFormats = [
+      {
+        url: originalUrl,
+        ext: "mp4",
+        format_id: "best",
+        format_note: "Default",
+        width: data.width || null,
+        height: data.height || null,
+        fps: data.fps || null,
+        vcodec: "unknown",
+        acodec: "unknown",
+        filesize: null,
+        filesize_approx: null,
+        tbr: null,
+        abr: null,
+        duration: data.duration || null,
+        isOriginalUrlFallback: true,
+      },
+    ];
+  }
+
+  return allFormats;
 };
 
 exports.postMedia = async (req, res, next) => {
@@ -3452,11 +3510,11 @@ exports.postMedia = async (req, res, next) => {
         "--no-playlist",
         "--no-warnings",
         "--socket-timeout",
-        "20",
+        "30",
         url,
       ],
       {
-        timeout: 45000,
+        timeout: 60000,
         windowsHide: true,
       }
     );
@@ -3523,15 +3581,19 @@ exports.postMedia = async (req, res, next) => {
         });
       }
 
-      const allFormats = Array.isArray(data.formats) ? data.formats : [];
+      const originalPageUrl = data.webpage_url || url;
+      const allFormats = normalizeFormats(data, originalPageUrl);
 
       const audioFormats = allFormats
         .filter((item) => {
+          const acodec = String(item.acodec || "").toLowerCase();
+          const vcodec = String(item.vcodec || "").toLowerCase();
+
           return (
             item.url &&
-            item.acodec &&
-            item.acodec !== "none" &&
-            (!item.vcodec || item.vcodec === "none")
+            acodec &&
+            acodec !== "none" &&
+            (!vcodec || vcodec === "none")
           );
         })
         .map((item) => {
@@ -3544,7 +3606,7 @@ exports.postMedia = async (req, res, next) => {
               item.abr || item.asr
                 ? `${Math.round(item.abr || item.asr)} kbps`
                 : item.format_note || "Audio",
-            ext: item.ext || "m4a",
+            ext: String(item.ext || "m4a").toLowerCase(),
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
             sizeEstimated: sizeInfo.sizeEstimated,
@@ -3576,13 +3638,15 @@ exports.postMedia = async (req, res, next) => {
 
       const progressiveVideoFormats = allFormats
         .filter((item) => {
+          const ext = String(item.ext || "mp4").toLowerCase();
+          const vcodec = String(item.vcodec || "unknown").toLowerCase();
+          const acodec = String(item.acodec || "unknown").toLowerCase();
+
           return (
             item.url &&
-            item.vcodec &&
-            item.vcodec !== "none" &&
-            item.acodec &&
-            item.acodec !== "none" &&
-            ["mp4", "webm"].includes(item.ext)
+            ["mp4", "webm", "mov"].includes(ext) &&
+            vcodec !== "none" &&
+            acodec !== "none"
           );
         })
         .map((item) => {
@@ -3592,16 +3656,16 @@ exports.postMedia = async (req, res, next) => {
             type: "video",
             url: item.url,
             quality: getQualityLabel(item),
-            ext: item.ext || "mp4",
+            ext: String(item.ext || "mp4").toLowerCase(),
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
             sizeEstimated: sizeInfo.sizeEstimated,
-            formatId: item.format_id || "",
+            formatId: item.format_id || "best",
             width: item.width || null,
             height: item.height || null,
             fps: item.fps || null,
-            vcodec: item.vcodec || "",
-            acodec: item.acodec || "",
+            vcodec: item.vcodec || "unknown",
+            acodec: item.acodec || "unknown",
             hasAudio: true,
             audioUrl: "",
             audioFormatId: "",
@@ -3610,17 +3674,22 @@ exports.postMedia = async (req, res, next) => {
               item.height,
               item.aspect_ratio
             ),
+            isOriginalUrlFallback: Boolean(item.isOriginalUrlFallback),
           };
         });
 
       const dashVideoFormats = allFormats
         .filter((item) => {
+          const ext = String(item.ext || "mp4").toLowerCase();
+          const vcodec = String(item.vcodec || "").toLowerCase();
+          const acodec = String(item.acodec || "").toLowerCase();
+
           return (
             item.url &&
-            item.vcodec &&
-            item.vcodec !== "none" &&
-            (!item.acodec || item.acodec === "none") &&
-            ["mp4", "webm"].includes(item.ext)
+            vcodec &&
+            vcodec !== "none" &&
+            (!acodec || acodec === "none") &&
+            ["mp4", "webm", "mov"].includes(ext)
           );
         })
         .map((item) => {
@@ -3630,7 +3699,7 @@ exports.postMedia = async (req, res, next) => {
             type: "video",
             url: item.url,
             quality: getQualityLabel(item),
-            ext: item.ext || "mp4",
+            ext: String(item.ext || "mp4").toLowerCase(),
             size: sizeInfo.size,
             sizeBytes: sizeInfo.sizeBytes,
             sizeEstimated: sizeInfo.sizeEstimated,
@@ -3683,7 +3752,6 @@ exports.postMedia = async (req, res, next) => {
         videoFormats[0] ||
         null;
 
-      const originalPageUrl = data.webpage_url || url;
       const playablePreviewUrl = getPublicPreviewUrl(req, originalPageUrl);
 
       isResponded = true;
@@ -3707,7 +3775,10 @@ exports.postMedia = async (req, res, next) => {
         previewHasAudio: true,
         previewAudioUrl: "",
 
-        rawPreviewUrl: bestPreview?.url || "",
+        rawPreviewUrl:
+          bestPreview && !bestPreview.isOriginalUrlFallback
+            ? bestPreview.url
+            : "",
         rawPreviewHasAudio: Boolean(bestPreview?.hasAudio),
         rawPreviewAudioUrl:
           bestPreview && !bestPreview.hasAudio ? bestPreview.audioUrl : "",
@@ -3825,15 +3896,11 @@ const streamYtDlpPreview = (url, req, res) => {
       } catch {}
 
       try {
-        if (!ytDlp.killed) {
-          ytDlp.kill("SIGKILL");
-        }
+        if (!ytDlp.killed) ytDlp.kill("SIGKILL");
       } catch {}
 
       try {
-        if (!ffmpeg.killed) {
-          ffmpeg.kill("SIGKILL");
-        }
+        if (!ffmpeg.killed) ffmpeg.kill("SIGKILL");
       } catch {}
     };
 
@@ -3859,11 +3926,8 @@ const streamYtDlpPreview = (url, req, res) => {
 
       cleanup();
 
-      if (!started) {
-        fail(err);
-      } else {
-        finish();
-      }
+      if (!started) fail(err);
+      else finish();
     });
 
     ffmpeg.stdin.on("error", (err) => {
@@ -3873,11 +3937,8 @@ const streamYtDlpPreview = (url, req, res) => {
 
       cleanup();
 
-      if (!started) {
-        fail(err);
-      } else {
-        finish();
-      }
+      if (!started) fail(err);
+      else finish();
     });
 
     ffmpeg.stdout.on("error", (err) => {
@@ -3887,11 +3948,8 @@ const streamYtDlpPreview = (url, req, res) => {
 
       cleanup();
 
-      if (!started) {
-        fail(err);
-      } else {
-        finish();
-      }
+      if (!started) fail(err);
+      else finish();
     });
 
     ytDlp.stderr.on("data", (data) => {
@@ -3905,21 +3963,15 @@ const streamYtDlpPreview = (url, req, res) => {
     ytDlp.on("error", (err) => {
       cleanup();
 
-      if (!started) {
-        fail(err);
-      } else {
-        finish();
-      }
+      if (!started) fail(err);
+      else finish();
     });
 
     ffmpeg.on("error", (err) => {
       cleanup();
 
-      if (!started) {
-        fail(err);
-      } else {
-        finish();
-      }
+      if (!started) fail(err);
+      else finish();
     });
 
     res.setHeader("Content-Type", "video/mp4");
@@ -4044,9 +4096,7 @@ exports.downloadDirectMedia = async (req, res) => {
   req.on("aborted", cleanupProcess);
 
   res.on("close", () => {
-    if (!hasFinished) {
-      cleanupProcess();
-    }
+    if (!hasFinished) cleanupProcess();
   });
 
   try {
@@ -4054,7 +4104,6 @@ exports.downloadDirectMedia = async (req, res) => {
       type,
       title,
       originalUrl,
-      platform,
       videoUrl,
       audioUrl,
       videoFormatId,
@@ -4076,26 +4125,27 @@ exports.downloadDirectMedia = async (req, res) => {
     const timestamp = Date.now();
     const extension = type === "audio" ? "mp3" : "mp4";
 
+    const originalUrlValue = String(originalUrl || "");
+    const hash = getUrlHash(originalUrlValue || videoUrl || audioUrl || timestamp);
+
     const outputPath = path.join(
       outputDir,
-      `${safeTitle}-${timestamp}-${getUrlHash(String(originalUrl || videoUrl || audioUrl))}.${extension}`
+      `${safeTitle}-${timestamp}-${hash}.${extension}`
     );
 
     outputPathToClean = outputPath;
 
-    const platformName = String(platform || "").toLowerCase();
-    const originalUrlValue = String(originalUrl || "");
-
-    const shouldUseYtDlp =
-      isValidHttpUrl(originalUrlValue) &&
-      (platformName.includes("youtube") ||
-        originalUrlValue.includes("youtube.com") ||
-        originalUrlValue.includes("youtu.be"));
+    /**
+     * Important:
+     * Use yt-dlp whenever originalUrl exists.
+     * This fixes X.com/Twitter, Instagram, Facebook, TikTok, Reddit, YouTube, etc.
+     */
+    const shouldUseYtDlp = isValidHttpUrl(originalUrlValue);
 
     if (shouldUseYtDlp) {
       const outputTemplate = path.join(
         outputDir,
-        `${safeTitle}-${timestamp}-${getUrlHash(originalUrlValue)}.%(ext)s`
+        `${safeTitle}-${timestamp}-${hash}.%(ext)s`
       );
 
       const selectedHasAudio = hasAudio === true || hasAudio === "true";
@@ -4105,6 +4155,8 @@ exports.downloadDirectMedia = async (req, res) => {
         "--newline",
         "--force-overwrites",
         "--no-warnings",
+        "--socket-timeout",
+        "30",
         "-N",
         "4",
       ];
@@ -4112,7 +4164,7 @@ exports.downloadDirectMedia = async (req, res) => {
       if (type === "audio") {
         args.push(
           "-f",
-          audioFormatId || "bestaudio",
+          audioFormatId || "bestaudio/best",
           "-x",
           "--audio-format",
           "mp3",
@@ -4121,13 +4173,18 @@ exports.downloadDirectMedia = async (req, res) => {
           originalUrlValue
         );
       } else {
-        let formatSpec = "bestvideo+bestaudio/best";
+        let formatSpec =
+          "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best";
 
-        if (videoFormatId && selectedHasAudio) {
-          formatSpec = `${videoFormatId}/best`;
-        } else if (videoFormatId && audioFormatId) {
+        if (videoFormatId && videoFormatId !== "best" && selectedHasAudio) {
+          formatSpec = `${videoFormatId}/best[ext=mp4]/best`;
+        } else if (
+          videoFormatId &&
+          videoFormatId !== "best" &&
+          audioFormatId
+        ) {
           formatSpec = `${videoFormatId}+${audioFormatId}/${videoFormatId}+bestaudio/best`;
-        } else if (videoFormatId) {
+        } else if (videoFormatId && videoFormatId !== "best") {
           formatSpec = `${videoFormatId}+bestaudio/bestvideo+bestaudio/best`;
         }
 
@@ -4135,6 +4192,8 @@ exports.downloadDirectMedia = async (req, res) => {
           "-f",
           formatSpec,
           "--merge-output-format",
+          "mp4",
+          "--recode-video",
           "mp4",
           "-o",
           outputTemplate,
@@ -4201,7 +4260,7 @@ exports.downloadDirectMedia = async (req, res) => {
         const files = fs
           .readdirSync(outputDir)
           .filter((file) =>
-            file.startsWith(`${safeTitle}-${timestamp}-${getUrlHash(originalUrlValue)}`)
+            file.startsWith(`${safeTitle}-${timestamp}-${hash}`)
           );
 
         if (!files.length) {
@@ -4324,7 +4383,8 @@ exports.downloadDirectMedia = async (req, res) => {
       return sendJsonIfConnected(res, 500, {
         status: "fail",
         code: "FFMPEG_START_FAILED",
-        error: "Download engine failed to start. Please check FFmpeg installation.",
+        error:
+          "Download engine failed to start. Please check FFmpeg installation.",
         details: err.message,
       });
     });
@@ -4374,9 +4434,7 @@ exports.downloadDirectMedia = async (req, res) => {
   } catch (err) {
     hasFinished = true;
 
-    if (clientCancelled || isClientDisconnected(res)) {
-      return;
-    }
+    if (clientCancelled || isClientDisconnected(res)) return;
 
     console.log("Direct download error:", err.message);
 
@@ -4405,12 +4463,7 @@ exports.proxyImage = async (req, res) => {
     const parsedUrl = new URL(imageUrl);
     const hostname = parsedUrl.hostname.toLowerCase();
 
-    const blockedHosts = [
-      "localhost",
-      "127.0.0.1",
-      "0.0.0.0",
-      "::1",
-    ];
+    const blockedHosts = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
 
     if (
       blockedHosts.includes(hostname) ||

@@ -52,6 +52,15 @@ routes.get("/api/v1/media", (req, res) => {
 
 routes.post("/api/v1/media", mediaLimiter, publicController.postMedia);
 
+routes.get("/api/v1/download-direct", (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Download API is working. Use POST method.",
+    method: "POST",
+    endpoint: "/api/v1/download-direct",
+  });
+});
+
 routes.post(
   "/api/v1/download-direct",
   mediaLimiter,
