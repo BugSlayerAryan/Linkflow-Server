@@ -224,8 +224,24 @@ routes.post(
   publicController.downloadDirectMedia
 );
 
+routes.get("/api/v1/download-fallback", (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Fallback Download API is working. Use POST method.",
+    method: "POST",
+    endpoint: "/api/v1/download-fallback",
+  });
+});
+
+routes.post(
+  "/api/v1/download-fallback",
+  mediaLimiter,
+  publicController.downloadFallbackMedia
+);
+
 routes.get("/api/v1/preview", previewLimiter, publicController.previewMedia);
 
 routes.get("/api/v1/proxy-image", mediaLimiter, publicController.proxyImage);
 
 module.exports = routes;
+

@@ -6478,6 +6478,285 @@ exports.downloadDirectMedia = async (req, res) => {
   }
 };
 
+
+exports.downloadFallbackMedia = async (req, res) => {
+  let childProcess = null;
+  let outputPath = "";
+  let hasFinished = false;
+
+  const cleanup = () => {
+    if (childProcess && !childProcess.killed) {
+      try {
+        childProcess.kill("SIGKILL");
+      } catch {}
+    }
+
+    if (outputPath) {
+      safeDeleteFile(outputPath);
+    }
+  };
+
+  req.on("aborted", cleanup);
+
+  res.on("close", () => {
+    if (!hasFinished) cleanup();
+  });
+
+  try {
+    const { type = "video", title, originalUrl } = req.body;
+
+    if (!["audio", "video"].includes(type)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_DOWNLOAD_TYPE",
+        error: "Download type must be audio or video.",
+      });
+    }
+
+    if (!isValidHttpUrl(originalUrl)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_ORIGINAL_URL",
+        error: "Valid originalUrl is required.",
+      });
+    }
+
+    console.log("[FALLBACK DOWNLOAD] started:", originalUrl);
+
+    const fallbackData = await callRapidApiFallback(originalUrl);
+    const medias = getRapidApiMedias(fallbackData);
+
+    const videoItems = medias.filter((item) => {
+      const mediaType = String(item.type || "").toLowerCase();
+      const ext = String(item.extension || item.ext || "").toLowerCase();
+
+      return mediaType === "video" || ["mp4", "webm", "mov"].includes(ext);
+    });
+
+    const audioItems = medias.filter((item) => {
+      const mediaType = String(item.type || "").toLowerCase();
+      const ext = String(item.extension || item.ext || "").toLowerCase();
+
+      return mediaType === "audio" || ["mp3", "m4a", "aac", "wav"].includes(ext);
+    });
+
+    const bestVideo = videoItems
+      .filter((item) => isValidHttpUrl(item.url))
+      .sort((a, b) => {
+        const aQuality = String(a.quality || "").toLowerCase();
+        const bQuality = String(b.quality || "").toLowerCase();
+
+        if (aQuality.includes("hd") && !bQuality.includes("hd")) return -1;
+        if (!aQuality.includes("hd") && bQuality.includes("hd")) return 1;
+
+        if (
+          aQuality.includes("no_watermark") &&
+          !bQuality.includes("no_watermark")
+        ) {
+          return -1;
+        }
+
+        if (
+          !aQuality.includes("no_watermark") &&
+          bQuality.includes("no_watermark")
+        ) {
+          return 1;
+        }
+
+        const heightDiff = Number(b.height || 0) - Number(a.height || 0);
+        if (heightDiff !== 0) return heightDiff;
+
+        return Number(b.data_size || b.size || 0) - Number(a.data_size || a.size || 0);
+      })[0];
+
+    const bestAudio = audioItems.find((item) => isValidHttpUrl(item.url));
+
+    if (type === "video" && !bestVideo?.url) {
+      return res.status(404).json({
+        status: "fail",
+        code: "FALLBACK_VIDEO_NOT_FOUND",
+        error: "Fallback API returned no downloadable video.",
+      });
+    }
+
+    if (type === "audio" && !bestAudio?.url && !bestVideo?.url) {
+      return res.status(404).json({
+        status: "fail",
+        code: "FALLBACK_AUDIO_NOT_FOUND",
+        error: "Fallback API returned no downloadable audio.",
+      });
+    }
+
+    const safeTitle = sanitizeFileName(
+      title || fallbackData.title || fallbackData.caption || "linkflow-download"
+    );
+    const timestamp = Date.now();
+    const extension = type === "audio" ? "mp3" : "mp4";
+
+    outputPath = path.join(
+      outputDir,
+      `${safeTitle}-${timestamp}-${getUrlHash(originalUrl)}-fallback.${extension}`
+    );
+
+    const args = ["-hide_banner", "-loglevel", "error", "-nostdin"];
+
+    if (type === "audio") {
+      args.push(
+        "-y",
+        "-i",
+        bestAudio?.url || bestVideo.url,
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        outputPath
+      );
+    } else if (bestAudio?.url) {
+      args.push(
+        "-y",
+        "-i",
+        bestVideo.url,
+        "-i",
+        bestAudio.url,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        outputPath
+      );
+    } else {
+      args.push(
+        "-y",
+        "-i",
+        bestVideo.url,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        outputPath
+      );
+    }
+
+    console.log(
+      "[FALLBACK DOWNLOAD] using RapidAPI + FFmpeg:",
+      JSON.stringify({
+        type,
+        hasVideo: Boolean(bestVideo?.url),
+        hasAudio: Boolean(bestAudio?.url),
+        videoQuality: bestVideo?.quality || null,
+        audioQuality: bestAudio?.quality || null,
+      })
+    );
+
+    childProcess = spawn(FFMPEG_PATH, args, {
+      timeout: 600000,
+      windowsHide: true,
+    });
+
+    let stderr = "";
+
+    childProcess.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    childProcess.on("error", (err) => {
+      hasFinished = true;
+      safeDeleteFile(outputPath);
+
+      console.log("[FALLBACK DOWNLOAD] FFmpeg start error:", err.message);
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          status: "fail",
+          code: "FALLBACK_FFMPEG_START_FAILED",
+          error: "Fallback download engine failed to start.",
+          details: err.message,
+          downloadEngine: "rapidapi-fallback-route",
+        });
+      }
+    });
+
+    childProcess.on("close", (code, signal) => {
+      if (signal === "SIGKILL" || res.destroyed || res.writableEnded) {
+        hasFinished = true;
+        safeDeleteFile(outputPath);
+        return;
+      }
+
+      if (code !== 0) {
+        hasFinished = true;
+        safeDeleteFile(outputPath);
+
+        const cleanError = getCleanProcessError(stderr);
+
+        console.log("[FALLBACK DOWNLOAD] FFmpeg failed:", cleanError);
+
+        if (!res.headersSent) {
+          return res.status(500).json({
+            status: "fail",
+            code: "FALLBACK_FFMPEG_FAILED",
+            error: "Fallback download failed.",
+            details: cleanError,
+            downloadEngine: "rapidapi-fallback-route",
+          });
+        }
+
+        return;
+      }
+
+      if (!fs.existsSync(outputPath)) {
+        hasFinished = true;
+
+        if (!res.headersSent) {
+          return res.status(500).json({
+            status: "fail",
+            code: "FALLBACK_FILE_NOT_FOUND",
+            error: "Fallback file was not created.",
+            downloadEngine: "rapidapi-fallback-route",
+          });
+        }
+
+        return;
+      }
+
+      hasFinished = true;
+
+      res.setHeader("X-Download-Engine", "rapidapi-fallback-route");
+      res.setHeader("X-Fallback-Used", "true");
+
+      console.log("[FALLBACK DOWNLOAD] completed with rapidapi-fallback-route");
+
+      return sendPreparedFile(res, outputPath, `${safeTitle}.${extension}`);
+    });
+  } catch (err) {
+    hasFinished = true;
+    safeDeleteFile(outputPath);
+
+    console.log("[FALLBACK DOWNLOAD] error:", err.message);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        status: "fail",
+        code: "FALLBACK_DOWNLOAD_FAILED",
+        error: "Fallback download failed.",
+        details: err.message,
+        downloadEngine: "rapidapi-fallback-route",
+      });
+    }
+  }
+};
+
+
 exports.proxyImage = async (req, res) => {
   let timeout = null;
 
