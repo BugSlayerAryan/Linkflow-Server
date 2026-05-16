@@ -163,7 +163,6 @@
 // routes.get("/api/v1/proxy-image", mediaLimiter, publicController.proxyImage);
 
 // module.exports = routes;
-
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 
@@ -239,9 +238,23 @@ routes.post(
   publicController.downloadFallbackMedia
 );
 
+routes.get("/api/v1/fallback-open", (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Fallback Open API is working. Use POST method.",
+    method: "POST",
+    endpoint: "/api/v1/fallback-open",
+  });
+});
+
+routes.post(
+  "/api/v1/fallback-open",
+  mediaLimiter,
+  publicController.openFallbackMedia
+);
+
 routes.get("/api/v1/preview", previewLimiter, publicController.previewMedia);
 
 routes.get("/api/v1/proxy-image", mediaLimiter, publicController.proxyImage);
 
 module.exports = routes;
-
