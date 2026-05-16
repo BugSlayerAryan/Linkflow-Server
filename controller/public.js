@@ -7,6 +7,7 @@ const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const { Readable } = require("stream");
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const YTDLP_PATH = process.env.YTDLP_PATH || "yt-dlp";
@@ -100,6 +101,59 @@ const getMediaHeadersForFfmpeg = (url = "") => {
     "Origin: https://www.youtube.com\r\nAccept: */*\r\nConnection: keep-alive\r\n",
   ];
 };
+
+const getMediaFetchHeaders = (url = "") => {
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    Accept: "*/*",
+    Connection: "keep-alive",
+  };
+
+  if (isGoogleVideoUrl(url)) {
+    headers.Referer = "https://www.youtube.com/";
+    headers.Origin = "https://www.youtube.com";
+  } else if (String(url || "").toLowerCase().includes("instagram")) {
+    headers.Referer = "https://www.instagram.com/";
+  } else if (String(url || "").toLowerCase().includes("fbcdn")) {
+    headers.Referer = "https://www.facebook.com/";
+  }
+
+  return headers;
+};
+
+const getExtensionFromUrlOrType = (url = "", type = "video", fallbackExt = "") => {
+  if (fallbackExt) {
+    return String(fallbackExt).replace(/^\./, "").toLowerCase();
+  }
+
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+
+    if (match?.[1]) {
+      return match[1];
+    }
+  } catch {}
+
+  return type === "audio" ? "mp3" : "mp4";
+};
+
+const getContentTypeFromExt = (ext = "", fallbackType = "video") => {
+  const normalized = String(ext || "").replace(/^\./, "").toLowerCase();
+
+  if (normalized === "mp3") return "audio/mpeg";
+  if (["m4a", "aac"].includes(normalized)) return "audio/mp4";
+  if (normalized === "wav") return "audio/wav";
+  if (normalized === "webm") return fallbackType === "audio" ? "audio/webm" : "video/webm";
+  if (normalized === "mov") return "video/quicktime";
+  if (normalized === "mp4") return fallbackType === "audio" ? "audio/mp4" : "video/mp4";
+
+  return fallbackType === "audio" ? "audio/mpeg" : "video/mp4";
+};
+
+
 
 
 const sanitizeFileName = (value = "linkflow-download") => {
@@ -1718,7 +1772,8 @@ exports.downloadDirectMedia = async (req, res) => {
     const runDirectDownload = (engineName = "direct") => {
       const currentVideoUrl = req.body.videoUrl || videoUrl;
       const currentAudioUrl = req.body.audioUrl || audioUrl;
-      const currentHasAudio = req.body.hasAudio === true || req.body.hasAudio === "true";
+      const currentHasAudio =
+        req.body.hasAudio === true || req.body.hasAudio === "true";
 
       console.log("[DOWNLOAD] using engine:", engineName);
       console.log(
@@ -1758,48 +1813,73 @@ exports.downloadDirectMedia = async (req, res) => {
         });
       }
 
-      const args = ["-hide_banner", "-loglevel", "error", "-nostdin"];
+      const shouldMerge =
+        type === "video" && isValidHttpUrl(currentAudioUrl) && !currentHasAudio;
 
-      if (type === "audio") {
+      const buildFfmpegArgs = (mode = "copy") => {
+        const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
+
+        if (type === "audio") {
+          args.push(
+            ...getMediaHeadersForFfmpeg(currentAudioUrl || currentVideoUrl),
+            "-i",
+            currentAudioUrl || currentVideoUrl,
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            outputPath
+          );
+
+          return args;
+        }
+
+        if (shouldMerge) {
+          args.push(
+            ...getMediaHeadersForFfmpeg(currentVideoUrl),
+            "-i",
+            currentVideoUrl,
+            ...getMediaHeadersForFfmpeg(currentAudioUrl),
+            "-i",
+            currentAudioUrl,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0"
+          );
+
+          if (mode === "transcode") {
+            args.push(
+              "-c:v",
+              "libx264",
+              "-preset",
+              "veryfast",
+              "-crf",
+              "23",
+              "-pix_fmt",
+              "yuv420p",
+              "-c:a",
+              "aac",
+              "-b:a",
+              "160k"
+            );
+          } else {
+            args.push(
+              "-c:v",
+              "copy",
+              "-c:a",
+              "aac",
+              "-b:a",
+              "192k"
+            );
+          }
+
+          args.push("-movflags", "+faststart", "-shortest", outputPath);
+          return args;
+        }
+
         args.push(
-          "-y",
-          ...getMediaHeadersForFfmpeg(currentAudioUrl || currentVideoUrl),
-          "-i",
-          currentAudioUrl || currentVideoUrl,
-          "-vn",
-          "-codec:a",
-          "libmp3lame",
-          "-b:a",
-          "192k",
-          outputPath
-        );
-      } else if (currentAudioUrl && !currentHasAudio) {
-        args.push(
-          "-y",
-          ...getMediaHeadersForFfmpeg(currentVideoUrl),
-          "-i",
-          currentVideoUrl,
-          ...getMediaHeadersForFfmpeg(currentAudioUrl),
-          "-i",
-          currentAudioUrl,
-          "-map",
-          "0:v:0",
-          "-map",
-          "1:a:0",
-          "-c:v",
-          "copy",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "192k",
-          "-movflags",
-          "+faststart",
-          "-shortest",
-          outputPath
-        );
-      } else {
-        args.push(
-          "-y",
           ...getMediaHeadersForFfmpeg(currentVideoUrl),
           "-i",
           currentVideoUrl,
@@ -1809,97 +1889,135 @@ exports.downloadDirectMedia = async (req, res) => {
           "+faststart",
           outputPath
         );
-      }
 
-      console.log("[DOWNLOAD] ffmpeg args mode:", currentAudioUrl && !currentHasAudio ? "merge-video-audio" : "single-input");
+        return args;
+      };
 
-      childProcess = spawn(FFMPEG_PATH, args, {
-        timeout: 600000,
-        windowsHide: true,
-      });
+      const startFfmpeg = (mode = "copy") => {
+        const args = buildFfmpegArgs(mode);
 
-      let stderr = "";
-      let isResponded = false;
-
-      childProcess.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
-
-      childProcess.on("error", (err) => {
-        if (isResponded || clientCancelled || isClientDisconnected(res)) return;
-
-        isResponded = true;
-        hasFinished = true;
-
-        console.log("[DOWNLOAD] FFmpeg start error:", err.message);
-
-        return sendJsonIfConnected(res, 500, {
-          status: "fail",
-          code: "FFMPEG_START_FAILED",
-          error:
-            "Download engine failed to start. Please check FFmpeg installation.",
-          details: err.message,
-          downloadEngine: engineName,
-        });
-      });
-
-      childProcess.on("close", (code, signal) => {
-        if (isResponded) return;
-
-        if (clientCancelled || signal === "SIGKILL" || isClientDisconnected(res)) {
-          hasFinished = true;
-          safeDeleteFile(outputPath);
-          return;
-        }
-
-        if (code !== 0) {
-          isResponded = true;
-          hasFinished = true;
-
-          safeDeleteFile(outputPath);
-
-          const cleanError = getCleanProcessError(stderr);
-          console.log("[DOWNLOAD] FFmpeg merge/download failed:", cleanError);
-
-          return sendJsonIfConnected(res, 500, {
-            status: "fail",
-            code: "FFMPEG_MERGE_FAILED",
-            error:
-              isYouTubeUrl(originalUrlValue) && (isGoogleVideoUrl(currentVideoUrl) || isGoogleVideoUrl(currentAudioUrl))
-                ? "YouTube returned separated signed video/audio URLs. Server merge failed for this video."
-                : "Download was not completed. Please try another quality.",
-            details: cleanError,
-            downloadEngine: engineName,
-            fallbackUsed: engineName.includes("rapidapi"),
-            canOpenManually: Boolean(currentVideoUrl),
-            openUrl: currentVideoUrl || "",
-            audioUrl: currentAudioUrl || "",
-          });
-        }
-
-        if (!fs.existsSync(outputPath)) {
-          isResponded = true;
-          hasFinished = true;
-
-          return sendJsonIfConnected(res, 500, {
-            status: "fail",
-            code: "PREPARED_FILE_NOT_FOUND",
-            error: "Prepared file not found.",
-            downloadEngine: engineName,
-          });
-        }
-
-        isResponded = true;
-        hasFinished = true;
-
-        res.setHeader("X-Download-Engine", engineName);
-        res.setHeader(
-          "X-Fallback-Used",
-          engineName.includes("rapidapi") ? "true" : "false"
+        console.log(
+          "[DOWNLOAD] ffmpeg args mode:",
+          shouldMerge ? `merge-video-audio-${mode}` : "single-input"
         );
 
-        return sendPreparedFile(res, outputPath, `${safeTitle}.${extension}`);
-      });
+        childProcess = spawn(FFMPEG_PATH, args, {
+          timeout: mode === "transcode" ? 900000 : 600000,
+          windowsHide: true,
+        });
+
+        let stderr = "";
+        let isResponded = false;
+
+        childProcess.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        childProcess.on("error", (err) => {
+          if (isResponded || clientCancelled || isClientDisconnected(res)) return;
+
+          isResponded = true;
+          hasFinished = true;
+
+          console.log("[DOWNLOAD] FFmpeg start error:", err.message);
+
+          return sendJsonIfConnected(res, 500, {
+            status: "fail",
+            code: "FFMPEG_START_FAILED",
+            error:
+              "Download engine failed to start. Please check FFmpeg installation.",
+            details: err.message,
+            downloadEngine: engineName,
+            singleVideoUrl: currentVideoUrl || "",
+            singleAudioUrl: currentAudioUrl || "",
+          });
+        });
+
+        childProcess.on("close", (code, signal) => {
+          if (isResponded) return;
+
+          if (clientCancelled || signal === "SIGKILL" || isClientDisconnected(res)) {
+            hasFinished = true;
+            safeDeleteFile(outputPath);
+            return;
+          }
+
+          if (code !== 0) {
+            const cleanError = getCleanProcessError(stderr);
+            console.log(`[DOWNLOAD] FFmpeg ${mode} failed:`, cleanError);
+
+            safeDeleteFile(outputPath);
+
+            /**
+             * First try stream copy because it is fast.
+             * If that fails for non-YouTube CDN streams, retry with H.264/AAC transcode.
+             * YouTube signed googlevideo URLs often fail at network/auth level, so transcoding
+             * usually cannot fix those.
+             */
+            if (
+              shouldMerge &&
+              mode === "copy" &&
+              !isGoogleVideoUrl(currentVideoUrl) &&
+              !isGoogleVideoUrl(currentAudioUrl)
+            ) {
+              console.log("[DOWNLOAD] retrying merge with transcode mode...");
+              return startFfmpeg("transcode");
+            }
+
+            isResponded = true;
+            hasFinished = true;
+
+            return sendJsonIfConnected(res, 500, {
+              status: "fail",
+              code: "FFMPEG_MERGE_FAILED",
+              error:
+                isYouTubeUrl(originalUrlValue) &&
+                (isGoogleVideoUrl(currentVideoUrl) ||
+                  isGoogleVideoUrl(currentAudioUrl))
+                  ? "YouTube returned separated signed video/audio URLs. Server merge failed for this video."
+                  : "Full video with audio could not be prepared. Video-only and audio-only fallback is available.",
+              details: cleanError,
+              downloadEngine: engineName,
+              fallbackUsed: engineName.includes("rapidapi"),
+              canDownloadSingle: true,
+              canOpenManually: Boolean(currentVideoUrl),
+              openUrl: currentVideoUrl || "",
+              singleVideoUrl: currentVideoUrl || "",
+              singleAudioUrl: currentAudioUrl || "",
+              audioUrl: currentAudioUrl || "",
+            });
+          }
+
+          if (!fs.existsSync(outputPath)) {
+            isResponded = true;
+            hasFinished = true;
+
+            return sendJsonIfConnected(res, 500, {
+              status: "fail",
+              code: "PREPARED_FILE_NOT_FOUND",
+              error: "Prepared file not found.",
+              downloadEngine: engineName,
+              canDownloadSingle: true,
+              singleVideoUrl: currentVideoUrl || "",
+              singleAudioUrl: currentAudioUrl || "",
+            });
+          }
+
+          isResponded = true;
+          hasFinished = true;
+
+          res.setHeader("X-Download-Engine", engineName);
+          res.setHeader(
+            "X-Fallback-Used",
+            engineName.includes("rapidapi") ? "true" : "false"
+          );
+          res.setHeader("X-Merge-Mode", shouldMerge ? mode : "single");
+
+          return sendPreparedFile(res, outputPath, `${safeTitle}.${extension}`);
+        });
+      };
+
+      return startFfmpeg("copy");
     };
 
     const shouldUseYtDlp =
@@ -2212,6 +2330,7 @@ exports.downloadFallbackMedia = async (req, res) => {
     if (type === "audio") {
       args.push(
         "-y",
+        ...getMediaHeadersForFfmpeg(bestAudio?.url || bestVideo.url),
         "-i",
         bestAudio?.url || bestVideo.url,
         "-vn",
@@ -2224,8 +2343,10 @@ exports.downloadFallbackMedia = async (req, res) => {
     } else if (bestAudio?.url) {
       args.push(
         "-y",
+        ...getMediaHeadersForFfmpeg(bestVideo.url),
         "-i",
         bestVideo.url,
+        ...getMediaHeadersForFfmpeg(bestAudio.url),
         "-i",
         bestAudio.url,
         "-map",
@@ -2246,6 +2367,7 @@ exports.downloadFallbackMedia = async (req, res) => {
     } else {
       args.push(
         "-y",
+        ...getMediaHeadersForFfmpeg(bestVideo.url),
         "-i",
         bestVideo.url,
         "-c",
@@ -2365,6 +2487,99 @@ exports.downloadFallbackMedia = async (req, res) => {
   }
 };
 
+
+
+
+exports.downloadSingleMedia = async (req, res) => {
+  try {
+    const { url, title, type = "video", ext = "" } = req.body;
+
+    if (!["audio", "video"].includes(type)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_DOWNLOAD_TYPE",
+        error: "Download type must be audio or video.",
+      });
+    }
+
+    if (!isValidHttpUrl(url)) {
+      return res.status(400).json({
+        status: "fail",
+        code: "INVALID_MEDIA_URL",
+        error: "Valid media URL is required.",
+      });
+    }
+
+    const safeTitle = sanitizeFileName(title || "linkflow-download");
+    const extension = getExtensionFromUrlOrType(url, type, ext);
+    const downloadName = `${safeTitle}-${type === "audio" ? "audio" : "video-only"}.${extension}`;
+
+    console.log(
+      "[SINGLE DOWNLOAD] streaming:",
+      JSON.stringify({
+        type,
+        extension,
+        isGoogleVideo: isGoogleVideoUrl(url),
+      })
+    );
+
+    const abortController = new AbortController();
+
+    req.on("aborted", () => {
+      abortController.abort();
+    });
+
+    const response = await fetch(url, {
+      signal: abortController.signal,
+      redirect: "follow",
+      headers: getMediaFetchHeaders(url),
+    });
+
+    if (!response.ok) {
+      return res.status(response.status === 403 ? 403 : 502).json({
+        status: "fail",
+        code: "SINGLE_MEDIA_FETCH_FAILED",
+        error:
+          response.status === 403
+            ? "The media URL was blocked or expired."
+            : "Could not fetch media URL.",
+        details: `Remote server returned ${response.status}`,
+      });
+    }
+
+    const contentLength = response.headers.get("content-length");
+    const contentType =
+      response.headers.get("content-type") ||
+      getContentTypeFromExt(extension, type);
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", createContentDisposition(downloadName));
+    res.setHeader("X-Download-Engine", "single-url-proxy");
+    res.setHeader("X-Merge-Used", "false");
+
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+
+    if (!response.body) {
+      const arrayBuffer = await response.arrayBuffer();
+      return res.send(Buffer.from(arrayBuffer));
+    }
+
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch (err) {
+    console.log("[SINGLE DOWNLOAD] error:", err.message);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        status: "fail",
+        code: "SINGLE_DOWNLOAD_FAILED",
+        error: "Single media download failed.",
+        details: err.message,
+      });
+    }
+  }
+};
 
 
 exports.openFallbackMedia = async (req, res) => {
