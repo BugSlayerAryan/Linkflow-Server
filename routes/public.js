@@ -38,6 +38,18 @@ const previewLimiter = rateLimit({
 
 routes.get("/", publicController.startApi);
 
+routes.get("/api/v1/media", (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Media API is working. Use POST method with { urls } body.",
+    method: "POST",
+    endpoint: "/api/v1/media",
+    body: {
+      urls: "https://example.com/video-url",
+    },
+  });
+});
+
 routes.post("/api/v1/media", mediaLimiter, publicController.postMedia);
 
 routes.post(
