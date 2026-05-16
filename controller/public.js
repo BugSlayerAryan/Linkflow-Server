@@ -5958,8 +5958,6 @@
 
 // process.on("SIGTERM", cleanupTempFolders);
 // process.on("SIGINT", cleanupTempFolders);
-
-
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -5979,6 +5977,90 @@ const RAPIDAPI_ALL_SOCIAL_URL =
   "https://auto-download-all-in-one.p.rapidapi.com/v1/social/autolink";
 const RAPIDAPI_ALL_SOCIAL_URL_PARAM =
   process.env.RAPIDAPI_ALL_SOCIAL_URL_PARAM || "url";
+
+/**
+ * yt-dlp must be available in the deployed runtime.
+ * Azure/App Service can sometimes run the app without using your Dockerfile,
+ * so this check gives a clear log instead of silently falling back forever.
+ */
+const YTDLP_COMMON_ARGS = [
+  "--no-playlist",
+  "--no-warnings",
+  "--socket-timeout",
+  "30",
+  "--force-ipv4",
+  "--geo-bypass",
+  "--add-header",
+  "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+];
+
+const runCommandAndCollect = (command, args = [], options = {}) => {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      timeout: options.timeout || 60000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+      },
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("error", (err) => {
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+
+    child.on("close", (code, signal) => {
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+};
+
+const logYtDlpAvailability = async () => {
+  try {
+    const result = await runCommandAndCollect(YTDLP_PATH, ["--version"], {
+      timeout: 15000,
+    });
+
+    if (result.code === 0 && result.stdout.trim()) {
+      console.log("[YTDLP] available:", {
+        path: YTDLP_PATH,
+        version: result.stdout.trim(),
+      });
+      return true;
+    }
+
+    console.log("[YTDLP] version check failed:", {
+      path: YTDLP_PATH,
+      code: result.code,
+      stderr: result.stderr.trim(),
+    });
+
+    return false;
+  } catch (err) {
+    console.log("[YTDLP] not available:", {
+      path: YTDLP_PATH,
+      message: err.message,
+      code: err.code || "",
+    });
+
+    return false;
+  }
+};
+
+logYtDlpAvailability();
 
 const outputDir = path.join(__dirname, "..", "downloads");
 const previewDir = path.join(__dirname, "..", "previews");
@@ -7041,11 +7123,8 @@ const shouldUseFallbackApi = (payload) => {
   const hasProperAudio = audios.some((item) => item.url);
 
   /**
-   * Important:
-   * Do not force RapidAPI just because acodec is "unknown".
-   * Many extractors return playable media while codec metadata is unknown.
-   *
-   * If yt-dlp produced any playable video or audio URL, keep yt-dlp response.
+   * Keep yt-dlp as primary when it returns any usable media URL.
+   * Do not force RapidAPI just because codec metadata is "unknown".
    */
   if (hasProperVideo || hasProperAudio) {
     return false;
@@ -7373,69 +7452,44 @@ exports.postMedia = async (req, res, next) => {
     let ytDlpError = null;
 
     try {
-      const ytDlp = spawn(
+      const ytDlpResultRaw = await runCommandAndCollect(
         YTDLP_PATH,
         [
           "-J",
-          "--no-playlist",
-          "--no-warnings",
-          "--socket-timeout",
-          "30",
+          ...YTDLP_COMMON_ARGS,
           url,
         ],
         {
-          timeout: 60000,
-          windowsHide: true,
+          timeout: 90000,
         }
       );
 
-      let stdout = "";
-      let stderr = "";
+      let ytDlpResult = null;
 
-      ytDlp.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
+      if (ytDlpResultRaw.stdout) {
+        try {
+          ytDlpResult = JSON.parse(ytDlpResultRaw.stdout);
+        } catch (parseErr) {
+          ytDlpResult = null;
+        }
+      }
 
-      ytDlp.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
+      if (ytDlpResultRaw.code !== 0 && !ytDlpResult) {
+        const friendlyError = normalizeErrorMessage(ytDlpResultRaw.stderr);
+        const error = new Error(friendlyError.error);
+        error.code = friendlyError.code;
+        error.statusCode = friendlyError.statusCode;
+        error.details = ytDlpResultRaw.stderr;
+        throw error;
+      }
 
-      const ytDlpResult = await new Promise((resolve, reject) => {
-        ytDlp.on("error", reject);
-
-        ytDlp.on("close", (code) => {
-          let data = null;
-
-          if (stdout) {
-            try {
-              data = JSON.parse(stdout);
-            } catch {
-              data = null;
-            }
-          }
-
-          if (code !== 0 && !data) {
-            const friendlyError = normalizeErrorMessage(stderr);
-            const error = new Error(friendlyError.error);
-            error.code = friendlyError.code;
-            error.statusCode = friendlyError.statusCode;
-            error.details = stderr;
-            reject(error);
-            return;
-          }
-
-          if (!data) {
-            const error = new Error("Invalid yt-dlp response.");
-            error.code = "INVALID_YTDLP_RESPONSE";
-            error.statusCode = 500;
-            error.details = stderr;
-            reject(error);
-            return;
-          }
-
-          resolve(data);
-        });
-      });
+      if (!ytDlpResult) {
+        const error = new Error("Invalid yt-dlp response.");
+        error.code = "INVALID_YTDLP_RESPONSE";
+        error.statusCode = 500;
+        error.details = ytDlpResultRaw.stderr;
+        throw error;
+      }
 
       ytDlpPayload = buildYtDlpPayload(ytDlpResult, req, url);
 
@@ -7545,10 +7599,7 @@ const streamYtDlpPreview = (url, req, res) => {
     const ytDlp = spawn(
       YTDLP_PATH,
       [
-        "--no-playlist",
-        "--no-warnings",
-        "--socket-timeout",
-        "30",
+        ...YTDLP_COMMON_ARGS,
         "-f",
         "best[ext=mp4]/best",
         "-o",
