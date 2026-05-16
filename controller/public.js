@@ -2870,6 +2870,9 @@
 
 
 
+
+
+
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -4011,6 +4014,15 @@ const getRapidApiMedias = (data = {}) => {
   return [];
 };
 
+const getUrlSearchParam = (url = "", key = "") => {
+  try {
+    const parsed = new URL(url);
+    return parsed.searchParams.get(key) || "";
+  } catch {
+    return "";
+  }
+};
+
 const getRapidApiItemText = (item = {}) => {
   return [
     item.quality,
@@ -4029,10 +4041,30 @@ const getRapidApiItemText = (item = {}) => {
     .toLowerCase();
 };
 
+const isYouTubeProgressiveItag = (url = "") => {
+  const itag = getUrlSearchParam(url, "itag");
+
+  /**
+   * Common YouTube progressive/muxed formats.
+   * These contain video + audio in the same file.
+   *
+   * 18 = 360p MP4 with audio
+   * 22 = 720p MP4 with audio
+   * 43/44/45/46 = old WebM progressive formats
+   * 59/78 = mobile/progressive MP4 variants
+   */
+  return ["18", "22", "43", "44", "45", "46", "59", "78"].includes(itag);
+};
+
 const isRapidApiVideoOnlyItem = (item = {}) => {
   const text = getRapidApiItemText(item);
+  const url = item.url || "";
   const acodec = String(item.acodec || item.audioCodec || "").toLowerCase();
   const hasAudioValue = item.hasAudio ?? item.has_audio ?? item.audio;
+
+  if (isYouTubeProgressiveItag(url)) {
+    return false;
+  }
 
   if (hasAudioValue === false || hasAudioValue === "false") return true;
   if (acodec === "none") return true;
@@ -4047,10 +4079,10 @@ const isRapidApiVideoOnlyItem = (item = {}) => {
   }
 
   /**
-   * YouTube fallback APIs commonly return DASH googlevideo streams.
-   * These video URLs are video-only and must be paired with audioUrl.
+   * YouTube DASH googlevideo streams are usually separated.
+   * But progressive itags like 18/22 are handled above as complete files.
    */
-  if (isGoogleVideoUrl(item.url || "")) {
+  if (isGoogleVideoUrl(url)) {
     return true;
   }
 
@@ -4058,9 +4090,11 @@ const isRapidApiVideoOnlyItem = (item = {}) => {
 };
 
 const rapidApiVideoHasEmbeddedAudio = (item = {}) => {
+  const url = item.url || "";
   const hasAudioValue = item.hasAudio ?? item.has_audio ?? item.audio;
   const acodec = String(item.acodec || item.audioCodec || "").toLowerCase();
 
+  if (isYouTubeProgressiveItag(url)) return true;
   if (hasAudioValue === true || hasAudioValue === "true") return true;
   if (acodec && acodec !== "none" && acodec !== "unknown") return true;
 
