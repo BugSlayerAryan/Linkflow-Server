@@ -1703,6 +1703,74 @@ exports.previewMedia = async (req, res) => {
   }
 };
 
+
+const streamRemoteMediaToResponse = async ({
+  req,
+  res,
+  url,
+  title = "linkflow-download",
+  type = "video",
+  ext = "",
+  engine = "single-url-proxy",
+}) => {
+  if (!isValidHttpUrl(url)) {
+    return sendJsonIfConnected(res, 400, {
+      status: "fail",
+      code: "INVALID_MEDIA_URL",
+      error: "Valid media URL is required.",
+    });
+  }
+
+  const safeTitle = sanitizeFileName(title || "linkflow-download");
+  const extension = getExtensionFromUrlOrType(url, type, ext);
+  const downloadName = `${safeTitle}.${extension}`;
+
+  const abortController = new AbortController();
+
+  req.on("aborted", () => {
+    abortController.abort();
+  });
+
+  const response = await fetch(url, {
+    signal: abortController.signal,
+    redirect: "follow",
+    headers: getMediaFetchHeaders(url),
+  });
+
+  if (!response.ok) {
+    return sendJsonIfConnected(res, response.status === 403 ? 403 : 502, {
+      status: "fail",
+      code: "REMOTE_MEDIA_FETCH_FAILED",
+      error:
+        response.status === 403
+          ? "The media URL was blocked or expired."
+          : "Could not fetch media URL.",
+      details: `Remote server returned ${response.status}`,
+    });
+  }
+
+  const contentLength = response.headers.get("content-length");
+  const contentType =
+    response.headers.get("content-type") ||
+    getContentTypeFromExt(extension, type);
+
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Content-Disposition", createContentDisposition(downloadName));
+  res.setHeader("X-Download-Engine", engine);
+  res.setHeader("X-Merge-Used", "false");
+
+  if (contentLength) {
+    res.setHeader("Content-Length", contentLength);
+  }
+
+  if (!response.body) {
+    const arrayBuffer = await response.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  }
+
+  return Readable.fromWeb(response.body).pipe(res);
+};
+
 exports.downloadDirectMedia = async (req, res) => {
   let childProcess = null;
   let hasFinished = false;
@@ -1815,6 +1883,24 @@ exports.downloadDirectMedia = async (req, res) => {
 
       const shouldMerge =
         type === "video" && isValidHttpUrl(currentAudioUrl) && !currentHasAudio;
+
+      /**
+       * Do not run FFmpeg for normal direct/progressive video downloads.
+       * Streaming the remote URL through backend is faster and avoids many
+       * single-input FFmpeg failures.
+       */
+      if (type === "video" && !shouldMerge) {
+        hasFinished = true;
+        return streamRemoteMediaToResponse({
+          req,
+          res,
+          url: currentVideoUrl,
+          title: safeTitle,
+          type: "video",
+          ext: req.body.ext || "mp4",
+          engine: `${engineName}-single-video`,
+        });
+      }
 
       const buildFfmpegArgs = (mode = "copy") => {
         const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
@@ -2502,71 +2588,24 @@ exports.downloadSingleMedia = async (req, res) => {
       });
     }
 
-    if (!isValidHttpUrl(url)) {
-      return res.status(400).json({
-        status: "fail",
-        code: "INVALID_MEDIA_URL",
-        error: "Valid media URL is required.",
-      });
-    }
-
-    const safeTitle = sanitizeFileName(title || "linkflow-download");
-    const extension = getExtensionFromUrlOrType(url, type, ext);
-    const downloadName = `${safeTitle}-${type === "audio" ? "audio" : "video-only"}.${extension}`;
-
     console.log(
       "[SINGLE DOWNLOAD] streaming:",
       JSON.stringify({
         type,
-        extension,
+        ext,
         isGoogleVideo: isGoogleVideoUrl(url),
       })
     );
 
-    const abortController = new AbortController();
-
-    req.on("aborted", () => {
-      abortController.abort();
+    return await streamRemoteMediaToResponse({
+      req,
+      res,
+      url,
+      title,
+      type,
+      ext,
+      engine: "single-url-proxy",
     });
-
-    const response = await fetch(url, {
-      signal: abortController.signal,
-      redirect: "follow",
-      headers: getMediaFetchHeaders(url),
-    });
-
-    if (!response.ok) {
-      return res.status(response.status === 403 ? 403 : 502).json({
-        status: "fail",
-        code: "SINGLE_MEDIA_FETCH_FAILED",
-        error:
-          response.status === 403
-            ? "The media URL was blocked or expired."
-            : "Could not fetch media URL.",
-        details: `Remote server returned ${response.status}`,
-      });
-    }
-
-    const contentLength = response.headers.get("content-length");
-    const contentType =
-      response.headers.get("content-type") ||
-      getContentTypeFromExt(extension, type);
-
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Disposition", createContentDisposition(downloadName));
-    res.setHeader("X-Download-Engine", "single-url-proxy");
-    res.setHeader("X-Merge-Used", "false");
-
-    if (contentLength) {
-      res.setHeader("Content-Length", contentLength);
-    }
-
-    if (!response.body) {
-      const arrayBuffer = await response.arrayBuffer();
-      return res.send(Buffer.from(arrayBuffer));
-    }
-
-    return Readable.fromWeb(response.body).pipe(res);
   } catch (err) {
     console.log("[SINGLE DOWNLOAD] error:", err.message);
 
@@ -2580,7 +2619,6 @@ exports.downloadSingleMedia = async (req, res) => {
     }
   }
 };
-
 
 exports.openFallbackMedia = async (req, res) => {
   try {
